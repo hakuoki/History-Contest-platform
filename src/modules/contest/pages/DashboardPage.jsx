@@ -5290,7 +5290,7 @@ function Dashboard({
                 {detailFromMine && registrationCodeRequired(detailData) && (
                   <DetailItem label="报名码" value={String(detailData.registration_code || '').trim() || '-'} />
                 )}
-                <DetailItem label="作品提交格式" value={competitionAttachmentText(detailData)} />
+                <DetailItem label="作品提交格式（单个文件大小在50M以内）" value={competitionAttachmentText(detailData)} />
                 <DetailItem label="字数要求" value={`${detailData.min_word_count || 0} ~ ${detailData.max_word_count || 0}`} />
                 <DetailItem label="是否公开排名" value={Number(detailData.show_ranking) ? '是' : '否'} />
                 {detailRegistered && (
