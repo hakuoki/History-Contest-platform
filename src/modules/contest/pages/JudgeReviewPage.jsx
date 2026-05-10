@@ -259,10 +259,24 @@ function formatTime(value) {
   return dt.format('YYYY-MM-DD HH:mm');
 }
 
-function isPdfContent(contentType = '', fileName = '') {
+export function isPdfContent(contentType = '', fileName = '') {
   const type = String(contentType || '').toLowerCase();
   if (type.includes('application/pdf')) return true;
   return String(fileName || '').toLowerCase().endsWith('.pdf');
+}
+
+export function resolveAttachmentPreviewExt({
+  activeExt = '',
+  contentType = '',
+  fileName = '',
+  previewFormat = '',
+} = {}) {
+  const hinted = String(previewFormat || '').trim().toLowerCase().replace(/^\./, '');
+  if (hinted) return hinted;
+  const normalizedActiveExt = String(activeExt || '').trim().toLowerCase().replace(/^\./, '');
+  if (normalizedActiveExt === 'docx') return 'pdf';
+  if (isPdfContent(contentType, fileName)) return 'pdf';
+  return normalizedActiveExt || 'pdf';
 }
 
 function normalizeScore(raw) {
@@ -1040,13 +1054,14 @@ export default function JudgeReviewPage({
       setPreviewError('');
       try {
         const activeExt = String(activeAttachment?.attachment_ext || '').trim().toLowerCase().replace(/^\./, '') || 'pdf';
+        const requestedAttachmentExt = activeExt === 'docx' ? 'pdf' : activeExt;
         const attachmentResult = await getAssignedSubmissionAttachmentBlob(
           normalizedCompetitionId,
           selectedSubmissionId,
           {
             requestId: createRequestId(),
             disposition: activeExt === 'xlsx' ? 'attachment' : 'inline',
-            attachmentExt: activeExt,
+            attachmentExt: requestedAttachmentExt,
             attachmentKey: String(activeAttachment?.attachment_key || '').trim(),
           }
         );
@@ -1064,6 +1079,13 @@ export default function JudgeReviewPage({
         const blob = attachmentResult?.blob || null;
         const fileName = attachmentResult?.fileName || activeAttachment?.attachment_name || `submission_${selectedSubmissionId}.${activeExt}`;
         const contentType = attachmentResult?.contentType || '';
+        const previewFormat = String(attachmentResult?.previewFormat || '').trim().toLowerCase().replace(/^\./, '');
+        const renderExt = resolveAttachmentPreviewExt({
+          activeExt,
+          contentType,
+          fileName,
+          previewFormat,
+        });
         if (!blob) {
           setPreviewName(fileName);
           setPreviewError('附件加载失败，请稍后重试');
@@ -1073,7 +1095,7 @@ export default function JudgeReviewPage({
         const downloadUrl = URL.createObjectURL(blob);
         setPreviewDownloadUrl(downloadUrl);
 
-        if (activeExt === 'pdf') {
+        if (renderExt === 'pdf') {
           if (!isPdfContent(contentType, fileName)) {
             setPreviewName(fileName);
             setPreviewError('该作品未提供可在线预览的 PDF，请下载后查看。');
@@ -1086,7 +1108,7 @@ export default function JudgeReviewPage({
           return;
         }
 
-        if (activeExt === 'docx') {
+        if (renderExt === 'docx') {
           const { html, warnings } = await convertDocxBlobToHtml(blob);
           if (cancelled) return;
           setPreviewName(fileName);
@@ -1097,7 +1119,7 @@ export default function JudgeReviewPage({
           return;
         }
 
-        if (isSpreadsheetPreview(activeExt, contentType)) {
+        if (isSpreadsheetPreview(renderExt, contentType)) {
           const sheets = await convertSpreadsheetBlobToSheets(blob);
           if (cancelled) return;
           setPreviewName(fileName);
@@ -1109,7 +1131,7 @@ export default function JudgeReviewPage({
           return;
         }
 
-        if (canPreviewAsText(activeExt, contentType)) {
+        if (canPreviewAsText(renderExt, contentType)) {
           const text = await decodeAttachmentBlobText(blob, { contentType, fileName });
           if (cancelled) return;
           setPreviewName(fileName);

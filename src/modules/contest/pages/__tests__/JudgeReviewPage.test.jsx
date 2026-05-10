@@ -9,6 +9,8 @@ import {
   extractCharsetFromContentType,
   extractXmlDeclaredEncoding,
   findFirstMissingReviewField,
+  isPdfContent,
+  resolveAttachmentPreviewExt,
 } from '../JudgeReviewPage.jsx';
 
 const rubricDimensions = [
@@ -144,6 +146,19 @@ describe('xml text preview encoding', () => {
     });
 
     expect(text).toContain('中文');
+  });
+});
+
+describe('pdf preview detection', () => {
+  it('treats backend converted docx blobs as pdf when content-type is pdf', () => {
+    expect(isPdfContent('application/pdf', 'paper.docx')).toBe(true);
+    expect(isPdfContent('application/pdf', 'paper.pdf')).toBe(true);
+  });
+
+  it('prefers backend preview format and falls back docx to pdf', () => {
+    expect(resolveAttachmentPreviewExt({ activeExt: 'docx' })).toBe('pdf');
+    expect(resolveAttachmentPreviewExt({ activeExt: 'docx', previewFormat: 'pdf' })).toBe('pdf');
+    expect(resolveAttachmentPreviewExt({ activeExt: 'xlsx' })).toBe('xlsx');
   });
 });
 

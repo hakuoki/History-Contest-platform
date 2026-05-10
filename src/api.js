@@ -631,6 +631,8 @@ export async function getAssignedSubmissionAttachmentBlob(competitionId, submiss
     fileName: pickFileName(response?.headers) || '',
     contentType: headerValue(response?.headers || {}, 'Content-Type') || '',
     requestId: pickRequestId(response?.headers) || requestId || '',
+    previewFormat: headerValue(response?.headers || {}, 'X-Contest-Preview-Format') || '',
+    previewConverted: headerValue(response?.headers || {}, 'X-Contest-Preview-Converted') === '1',
   };
 }
 
