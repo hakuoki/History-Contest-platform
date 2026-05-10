@@ -360,6 +360,56 @@ export async function getCompetitionById(id, options = {}) {
   };
 }
 
+export async function getCompetitionScoringSettings(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/scoring-settings`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function updateCompetitionScoringSettings(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.put(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/scoring-settings`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function unlockCompetitionScoringSettings(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/scoring-settings/unlock`,
+    {},
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function listScoringRubricVersions(rubricKey, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${CONTEST_API_PREFIX}/scoring/rubrics/${encodeURIComponent(String(rubricKey || '').trim())}/versions`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    items: response?.data?.data?.items || [],
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
 export async function getCompetitionTrainingManualMeta(competitionId, options = {}) {
   const { requestId } = options;
   const response = await client.get(
@@ -563,13 +613,14 @@ export async function listMyAssignedSubmissionsPaged(
 }
 
 export async function getAssignedSubmissionAttachmentBlob(competitionId, submissionId, options = {}) {
-  const { requestId, disposition = 'inline', attachmentExt = 'pdf' } = options;
+  const { requestId, disposition = 'inline', attachmentExt = 'pdf', attachmentKey = '' } = options;
   const response = await client.get(
     `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/judges/me/assigned-submissions/${Number(submissionId)}/attachment`,
     {
       params: {
         disposition,
         attachment_ext: String(attachmentExt || '').trim().toLowerCase().replace(/^\./, '') || 'pdf',
+        attachment_key: String(attachmentKey || '').trim() || undefined,
       },
       headers: requestIdHeaders(requestId),
       responseType: 'blob',
@@ -590,6 +641,18 @@ export async function getMyAssignedSubmissionReview(competitionId, submissionId,
     {
       headers: requestIdHeaders(requestId),
     }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getAssignedSubmissionReviewContext(competitionId, submissionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/judges/me/assigned-submissions/${Number(submissionId)}/review-context`,
+    { headers: requestIdHeaders(requestId) }
   );
   return {
     data: response?.data?.data || null,

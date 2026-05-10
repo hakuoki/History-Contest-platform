@@ -51,6 +51,7 @@ import {
   decideUserSyncReview,
   deleteCompetition,
   getCompetitionById,
+  getCompetitionScoringSettings,
   getCompetitionTrainingManualMeta,
   getCreatePermission,
   getMySubmissionAttachmentBlob,
@@ -58,6 +59,7 @@ import {
   getMySubmissionDetail,
   getUserSyncReviewPermission,
   listCompetitionParticipantsStatusPaged,
+  listScoringRubricVersions,
   listCompetitionJudgesPaged,
   listCompetitionsPaged,
   listMyCompetitionsPaged,
@@ -69,7 +71,9 @@ import {
   registerParticipant,
   submitSubmission as submitSubmissionApi,
   unregisterParticipant,
+  unlockCompetitionScoringSettings,
   updateCompetitionJudgeStatus,
+  updateCompetitionScoringSettings,
   updateCurrentUserProfile,
   updateCompetition,
   uploadSubmissionAttachment,
@@ -183,6 +187,11 @@ const USER_SYNC_REVIEW_CONFIRM_TEXT = {
   approve: '确认同步',
   reject: '确认拒绝',
 };
+const SCORING_MODE_OPTIONS = [
+  { value: 'single_score', label: '单分模式（总分+评语）' },
+  { value: 'history_paper_quantitative', label: '历史论文量化评分（7维度）' },
+];
+const DEFAULT_RUBRIC_KEY = 'history_paper_quantitative';
 const USER_SYNC_CONFLICT_HINT =
   '“冲突”表示系统在同步到 users 时，发现邮箱/手机号无法唯一对应同一账号（如分别命中不同用户），为避免错绑账号而拒绝自动同步。';
 const CONTEST_THEME = {
@@ -1620,6 +1629,16 @@ function Dashboard({
   const [judgeAddConfirmAccount, setJudgeAddConfirmAccount] = useState('');
   const [judgeAddCandidate, setJudgeAddCandidate] = useState(null);
   const [judgeAddConfirmLoading, setJudgeAddConfirmLoading] = useState(false);
+  const [scoringOpen, setScoringOpen] = useState(false);
+  const [scoringTarget, setScoringTarget] = useState(null);
+  const [scoringLoading, setScoringLoading] = useState(false);
+  const [scoringSaving, setScoringSaving] = useState(false);
+  const [scoringUnlocking, setScoringUnlocking] = useState(false);
+  const [scoringSettings, setScoringSettings] = useState(null);
+  const [scoringMode, setScoringMode] = useState('single_score');
+  const [scoringRubricVersions, setScoringRubricVersions] = useState([]);
+  const [scoringRubricVersionKey, setScoringRubricVersionKey] = useState('');
+  const [scoringCanEdit, setScoringCanEdit] = useState(true);
   const [myInfoOpen, setMyInfoOpen] = useState(false);
   const [myInfoCompetition, setMyInfoCompetition] = useState(null);
   const latestRequestIdsRef = useRef({
@@ -1633,6 +1652,7 @@ function Dashboard({
     submission: '',
     participants: '',
     judges: '',
+    scoring: '',
   });
   const submissionStatusLoadRef = useRef({
     inFlight: false,
@@ -4024,6 +4044,112 @@ function Dashboard({
     }
   };
 
+  const loadScoringSettings = async (competitionId) => {
+    const safeCompetitionId = Number(competitionId);
+    if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
+    const requestId = createRequestId();
+    latestRequestIdsRef.current.scoring = requestId;
+    setScoringLoading(true);
+    try {
+      const { data, requestId: echoedRequestId } = await getCompetitionScoringSettings(
+        safeCompetitionId,
+        { requestId }
+      );
+      if (latestRequestIdsRef.current.scoring !== echoedRequestId) return;
+
+      const settings = data || null;
+      const nextMode = String(settings?.settings?.mode_key || 'single_score').trim() || 'single_score';
+      const nextRubricKey = String(settings?.settings?.rubric_key || DEFAULT_RUBRIC_KEY).trim() || DEFAULT_RUBRIC_KEY;
+      const nextVersionKey = String(settings?.settings?.rubric_version_key || '').trim();
+
+      setScoringSettings(settings);
+      setScoringMode(nextMode);
+      setScoringCanEdit(Boolean(settings?.can_edit));
+      setScoringRubricVersionKey(nextVersionKey);
+
+      const { items } = await listScoringRubricVersions(nextRubricKey, { requestId: createRequestId() });
+      const rows = Array.isArray(items) ? items : [];
+      setScoringRubricVersions(rows);
+
+      if (nextMode === 'history_paper_quantitative' && !nextVersionKey) {
+        const published = rows.find((item) => String(item?.status || '').toLowerCase() === 'published');
+        if (published?.version_key) {
+          setScoringRubricVersionKey(String(published.version_key));
+        }
+      }
+    } catch (error) {
+      if (latestRequestIdsRef.current.scoring !== requestId) return;
+      setScoringSettings(null);
+      setScoringRubricVersions([]);
+      setScoringRubricVersionKey('');
+      setScoringCanEdit(true);
+      setMessage({ type: 'error', text: getErrorText(error, '加载评分设置失败') });
+    } finally {
+      if (latestRequestIdsRef.current.scoring === requestId) setScoringLoading(false);
+    }
+  };
+
+  const openScoringDialog = async (row) => {
+    const safeCompetitionId = Number(row?.id);
+    if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
+    setScoringTarget(row);
+    setScoringOpen(true);
+    setScoringSettings(null);
+    setScoringMode('single_score');
+    setScoringRubricVersions([]);
+    setScoringRubricVersionKey('');
+    setScoringCanEdit(true);
+    await loadScoringSettings(safeCompetitionId);
+  };
+
+  const submitScoringSettings = async () => {
+    const safeCompetitionId = Number(scoringTarget?.id);
+    if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
+
+    const normalizedMode = String(scoringMode || '').trim() || 'single_score';
+    const payload = { mode_key: normalizedMode };
+    if (normalizedMode === 'history_paper_quantitative') {
+      const versionKey = String(scoringRubricVersionKey || '').trim();
+      if (!versionKey) {
+        setMessage({ type: 'warning', text: '请选择评分规则版本' });
+        return;
+      }
+      payload.rubric_key = DEFAULT_RUBRIC_KEY;
+      payload.rubric_version_key = versionKey;
+    }
+
+    setScoringSaving(true);
+    try {
+      const { data } = await updateCompetitionScoringSettings(safeCompetitionId, payload, { requestId: createRequestId() });
+      setScoringSettings(data || null);
+      setScoringCanEdit(Boolean(data?.can_edit));
+      setMessage({ type: 'success', text: '评分设置已保存' });
+    } catch (error) {
+      setMessage({ type: 'error', text: getErrorText(error, '保存评分设置失败') });
+    } finally {
+      setScoringSaving(false);
+    }
+  };
+
+  const unlockScoringSettings = async () => {
+    const safeCompetitionId = Number(scoringTarget?.id);
+    if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
+    setScoringUnlocking(true);
+    try {
+      const { data } = await unlockCompetitionScoringSettings(
+        safeCompetitionId,
+        { requestId: createRequestId() }
+      );
+      setScoringSettings(data || null);
+      setScoringCanEdit(Boolean(data?.can_edit));
+      setMessage({ type: 'success', text: '评分设置已手动解锁，请尽快完成调整' });
+    } catch (error) {
+      setMessage({ type: 'error', text: getErrorText(error, '解锁评分设置失败') });
+    } finally {
+      setScoringUnlocking(false);
+    }
+  };
+
   const exportParticipantsExcel = async () => {
     const competitionId = Number(participantsTarget?.id);
     if (Number.isNaN(competitionId) || competitionId <= 0) return;
@@ -4436,6 +4562,16 @@ function Dashboard({
                         }}
                       >
                         评委管理
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openScoringDialog(row);
+                        }}
+                      >
+                        评分设置
                       </Button>
                       <Button
                         variant="outlined"
@@ -5391,6 +5527,14 @@ function Dashboard({
                 评委管理
               </Button>
             )}
+            {detailData && (detailFromMine || canCreateCompetition) && (
+              <Button
+                variant="outlined"
+                onClick={() => openScoringDialog(detailData)}
+              >
+                评分设置
+              </Button>
+            )}
             {detailFromMine && detailData && (
               <Button
                 variant="outlined"
@@ -6215,6 +6359,124 @@ function Dashboard({
             disabled={judgeSubmitting || judgeAddConfirmLoading}
           >
             {judgeSubmitting ? '提交中...' : '确认添加'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={scoringOpen}
+        onClose={(event, reason) => {
+          if (scoringSaving || scoringLoading || scoringUnlocking || reason === 'backdropClick') return;
+          setScoringOpen(false);
+          setScoringTarget(null);
+        }}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>
+          评分设置（比赛：{scoringTarget?.name || scoringTarget?.id || '-'}）
+        </DialogTitle>
+        <DialogContent dividers>
+          {scoringLoading ? (
+            <Stack alignItems="center" spacing={1.2} sx={{ py: 4 }}>
+              <CircularProgress size={24} />
+              <Typography variant="body2" color="text.secondary">加载评分设置中...</Typography>
+            </Stack>
+          ) : (
+            <Stack spacing={1.5}>
+              <Alert severity="info">
+                评分设置会影响评委评审界面与评分数据结构，建议在评审开始前完成配置。
+              </Alert>
+              {!scoringCanEdit && (
+                <Alert severity="warning">
+                  当前评分设置已锁定（评审已开始或已产生评分），仅支持查看。
+                </Alert>
+              )}
+              {!scoringCanEdit && (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  disabled={scoringUnlocking || scoringSaving || scoringLoading}
+                  onClick={unlockScoringSettings}
+                >
+                  {scoringUnlocking ? '解锁中...' : '管理员手动解锁'}
+                </Button>
+              )}
+              <FormControl fullWidth size="small">
+                <InputLabel>评分模式</InputLabel>
+                <Select
+                  label="评分模式"
+                  value={scoringMode}
+                  disabled={!scoringCanEdit || scoringSaving || scoringUnlocking}
+                  onChange={(event) => {
+                    const nextMode = String(event.target.value || '').trim() || 'single_score';
+                    setScoringMode(nextMode);
+                    if (nextMode === 'single_score') setScoringRubricVersionKey('');
+                    if (nextMode === 'history_paper_quantitative' && !scoringRubricVersionKey) {
+                      const published = scoringRubricVersions.find((item) => String(item?.status || '').toLowerCase() === 'published');
+                      if (published?.version_key) setScoringRubricVersionKey(String(published.version_key));
+                    }
+                  }}
+                >
+                  {SCORING_MODE_OPTIONS.map((item) => (
+                    <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              {scoringMode === 'history_paper_quantitative' && (
+                <FormControl fullWidth size="small">
+                  <InputLabel>评分规则版本</InputLabel>
+                  <Select
+                    label="评分规则版本"
+                    value={scoringRubricVersionKey}
+                    disabled={!scoringCanEdit || scoringSaving || scoringUnlocking || !scoringRubricVersions.length}
+                    onChange={(event) => setScoringRubricVersionKey(String(event.target.value || '').trim())}
+                  >
+                    {scoringRubricVersions.map((item) => (
+                      <MenuItem key={`${item.rubric_key}_${item.version_key}`} value={String(item.version_key || '')}>
+                        {`${item.name || item.version_key || '-'}（${item.version_key || '-'}）${String(item.status || '').toLowerCase() === 'published' ? ' · 已发布' : ''}`}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                  {!scoringRubricVersions.length && (
+                    <FormHelperText>暂无可选规则版本，请先在后端创建并发布规则版本。</FormHelperText>
+                  )}
+                </FormControl>
+              )}
+
+              <Stack spacing={0.3} sx={{ px: 0.5 }}>
+                <Typography variant="body2" color="text.secondary">
+                  当前状态：{String(scoringSettings?.settings?.status || '-')}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  当前模式：{String(scoringSettings?.settings?.mode_key || '-')}
+                </Typography>
+                {String(scoringSettings?.settings?.rubric_version_key || '').trim() && (
+                  <Typography variant="body2" color="text.secondary">
+                    当前规则版本：{String(scoringSettings?.settings?.rubric_version_key || '-')}
+                  </Typography>
+                )}
+              </Stack>
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setScoringOpen(false);
+              setScoringTarget(null);
+            }}
+            disabled={scoringSaving || scoringLoading || scoringUnlocking}
+          >
+            关闭
+          </Button>
+          <Button
+            variant="contained"
+            disabled={scoringSaving || scoringLoading || scoringUnlocking || !scoringCanEdit}
+            onClick={submitScoringSettings}
+          >
+            {scoringSaving ? '保存中...' : '保存评分设置'}
           </Button>
         </DialogActions>
       </Dialog>
