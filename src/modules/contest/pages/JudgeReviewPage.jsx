@@ -36,31 +36,15 @@ const PAGE_SIZE = 200;
 const PREVIEW_MIN_HEIGHT_DESKTOP = 'max(1020px, calc(100vh - 150px))';
 const PREVIEW_PANEL_MIN_HEIGHT_DESKTOP = 'max(1080px, calc(100vh - 100px))';
 const LIST_HEIGHT_DESKTOP = PREVIEW_MIN_HEIGHT_DESKTOP;
+const WORK_DESCRIPTION_NODE_KEY = '__work_description__';
 const FATAL_GRADE_BASELINE_SCORE = 44;
 const FATAL_ITEM_PENALTY = 11;
-const CAP_ITEM_PENALTY = 5;
-const CAP_SCORE_CEILING = 74;
-const AUTO_CAP_RULES = {
-  cap_no_question: { itemCode: 'A1', threshold: 1 },
-  cap_no_evidence: { itemCode: 'C1', threshold: 1 },
-  cap_source_error: { itemCode: 'D3', threshold: 1 },
-  cap_literature_gap: { itemCode: 'B1', threshold: 1 },
-  cap_structure_imbalance: { itemCode: 'F1', threshold: 1 },
-};
 
 function formatRangeNumber(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return '';
   if (Number.isInteger(numeric)) return String(numeric);
   return String(numeric).replace(/\.?0+$/, '');
-}
-
-function buildCapTriggerConditionLabel(capCode) {
-  const rule = AUTO_CAP_RULES[String(capCode || '').trim()];
-  if (!rule) return '';
-  const upper = formatRangeNumber(rule.threshold);
-  if (!upper) return '';
-  return `${rule.itemCode}=0-${upper}`;
 }
 
 function round2(value) {
@@ -89,7 +73,20 @@ function listQuantitativeReviewItems(rubricDimensions = []) {
   for (const dimension of (Array.isArray(rubricDimensions) ? rubricDimensions : [])) {
     const dimensionCode = String(dimension?.code || '').trim().toUpperCase();
     const dimensionName = String(dimension?.name || '').trim();
-    for (const item of (Array.isArray(dimension?.items) ? dimension.items : [])) {
+    const dimensionItems = Array.isArray(dimension?.items) ? dimension.items : [];
+    if (!dimensionItems.length) {
+      if (!dimensionCode) continue;
+      items.push({
+        code: dimensionCode,
+        label: `${dimensionCode}${dimensionName ? ` ${dimensionName}` : ''}`,
+        maxScore: Number(dimension?.weight || 0),
+        dimensionCode,
+        dimensionName,
+        isDimensionTotal: true,
+      });
+      continue;
+    }
+    for (const item of dimensionItems) {
       const code = String(item?.code || '').trim().toUpperCase();
       if (!code) continue;
       items.push({
@@ -98,6 +95,7 @@ function listQuantitativeReviewItems(rubricDimensions = []) {
         maxScore: Number(item?.max_score || 0),
         dimensionCode,
         dimensionName,
+        isDimensionTotal: false,
       });
     }
   }
@@ -184,9 +182,25 @@ export function buildQuantitativeSnapshot(rubricDimensions = [], rubricConfig = 
   let rawTotalScore = 0;
   let hasAnyItemInput = false;
   for (const dimension of (Array.isArray(rubricDimensions) ? rubricDimensions : [])) {
+    const dimensionCode = String(dimension?.code || '').trim().toUpperCase();
+    const dimWeight = Number(dimension?.weight || 0);
     const items = Array.isArray(dimension?.items) ? dimension.items : [];
+    if (!items.length) {
+      if (!dimensionCode) continue;
+      const raw = String(itemScoreInput?.[dimensionCode] ?? '').trim();
+      if (raw) hasAnyItemInput = true;
+      const parsed = Number(raw);
+      const normalized = Number.isFinite(parsed)
+        ? Math.max(0, Math.min(parsed, dimWeight))
+        : 0;
+      const fixedScore = round2(normalized);
+      itemScoreMap[dimensionCode] = fixedScore;
+      rawTotalScore += fixedScore;
+      continue;
+    }
+    let dimensionTotal = 0;
     for (const item of items) {
-      const code = String(item?.code || '').trim();
+      const code = String(item?.code || '').trim().toUpperCase();
       if (!code) continue;
       const maxScore = Number(item?.max_score || 0);
       const raw = String(itemScoreInput?.[code] ?? '').trim();
@@ -197,8 +211,9 @@ export function buildQuantitativeSnapshot(rubricDimensions = [], rubricConfig = 
         : 0;
       const fixedScore = round2(normalized);
       itemScoreMap[code] = fixedScore;
-      rawTotalScore += fixedScore;
+      dimensionTotal += fixedScore;
     }
+    rawTotalScore += dimensionTotal;
   }
   rawTotalScore = round2(rawTotalScore);
 
@@ -208,33 +223,16 @@ export function buildQuantitativeSnapshot(rubricDimensions = [], rubricConfig = 
       .filter(Boolean)
   )];
 
-  const autoCapHits = [];
-  for (const [code, rule] of Object.entries(AUTO_CAP_RULES)) {
-    const raw = String(itemScoreInput?.[rule.itemCode] ?? '').trim();
-    if (!raw) continue;
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed)) continue;
-    const itemScore = Number(itemScoreMap[rule.itemCode] ?? 0);
-    if (itemScore <= Number(rule.threshold)) autoCapHits.push(code);
-  }
-
   const rawGrade = scoreToGrade(rawTotalScore, rubricConfig?.grade_thresholds || []);
   let finalScore = rawTotalScore;
   let finalGrade = rawGrade;
   let fatalTriggered = false;
-  let capTriggered = false;
 
   if (normalizedFatalHits.length > 0) {
     fatalTriggered = true;
     finalScore = Math.max(0, FATAL_GRADE_BASELINE_SCORE - (normalizedFatalHits.length * FATAL_ITEM_PENALTY));
     finalScore = round2(finalScore);
     finalGrade = 'E';
-  } else if (autoCapHits.length > 0) {
-    capTriggered = true;
-    finalScore = Math.min(finalScore, CAP_SCORE_CEILING);
-    finalScore = Math.max(0, finalScore - (autoCapHits.length * CAP_ITEM_PENALTY));
-    finalScore = round2(finalScore);
-    finalGrade = scoreToGrade(finalScore, rubricConfig?.grade_thresholds || []);
   }
 
   return {
@@ -244,9 +242,9 @@ export function buildQuantitativeSnapshot(rubricDimensions = [], rubricConfig = 
     finalScore,
     finalGrade,
     fatalHits: normalizedFatalHits,
-    capHits: autoCapHits,
+    capHits: [],
     fatalTriggered,
-    capTriggered,
+    capTriggered: false,
     hasAnyItemInput,
     hasAnyInput: hasAnyItemInput || normalizedFatalHits.length > 0,
   };
@@ -257,6 +255,40 @@ function formatTime(value) {
   const dt = dayjs(value);
   if (!dt.isValid()) return '-';
   return dt.format('YYYY-MM-DD HH:mm');
+}
+
+function normalizeWorkDescription(value = '') {
+  return String(value || '').replace(/\r\n?/g, '\n').trim();
+}
+
+function canonicalAttachmentExt(value = '') {
+  const token = String(value || '').trim().toLowerCase().replace(/^\./, '');
+  if (token === 'doc' || token === 'docx' || token === 'word') return 'docx';
+  if (token === 'xls' || token === 'xlsx' || token === 'excel') return 'xlsx';
+  return token;
+}
+
+function buildOfficePreviewFailureMessage(ext = '') {
+  const normalizedExt = canonicalAttachmentExt(ext);
+  if (normalizedExt === 'xlsx') {
+    return 'Excel 转 PDF 失败，请点击“下载原件”下载原文件。';
+  }
+  if (normalizedExt === 'docx') {
+    return 'Word 转 PDF 失败，请点击“下载原件”下载原文件。';
+  }
+  return 'Office 转 PDF 失败，请点击“下载原件”下载原文件。';
+}
+
+export function resolveJudgeReviewAttachmentRequestPlan(activeExt = '') {
+  const normalizedActiveExt = canonicalAttachmentExt(activeExt) || 'pdf';
+  return {
+    activeExt: normalizedActiveExt,
+    previewAttachmentExt: normalizedActiveExt === 'docx' ? 'pdf' : normalizedActiveExt,
+    downloadAttachmentExt: normalizedActiveExt,
+    previewDisposition: normalizedActiveExt === 'xlsx' ? 'attachment' : 'inline',
+    downloadDisposition: 'attachment',
+    needsSeparatePreviewRequest: normalizedActiveExt === 'docx',
+  };
 }
 
 export function isPdfContent(contentType = '', fileName = '') {
@@ -271,9 +303,9 @@ export function resolveAttachmentPreviewExt({
   fileName = '',
   previewFormat = '',
 } = {}) {
-  const hinted = String(previewFormat || '').trim().toLowerCase().replace(/^\./, '');
+  const hinted = canonicalAttachmentExt(previewFormat);
   if (hinted) return hinted;
-  const normalizedActiveExt = String(activeExt || '').trim().toLowerCase().replace(/^\./, '');
+  const normalizedActiveExt = canonicalAttachmentExt(activeExt);
   if (normalizedActiveExt === 'docx') return 'pdf';
   if (isPdfContent(contentType, fileName)) return 'pdf';
   return normalizedActiveExt || 'pdf';
@@ -296,13 +328,13 @@ function normalizeItemScore(raw, maxScore) {
   const text = String(raw ?? '').trim();
   if (!text) return { ok: true, value: 0 };
   const parsed = Number(text);
-  if (!Number.isFinite(parsed)) return { ok: false, message: '子项分数必须是数字' };
+  if (!Number.isFinite(parsed)) return { ok: false, message: '评分必须是数字' };
   if (parsed < 0 || parsed > Number(maxScore || 0)) {
-    return { ok: false, message: `子项分数范围应为 0 到 ${Number(maxScore || 0)}` };
+    return { ok: false, message: `评分范围应为 0 到 ${Number(maxScore || 0)}` };
   }
   const itemScoreMatch = text.match(/^(\d+)(?:\.(\d*))?$/);
   if (!itemScoreMatch || String(itemScoreMatch[2] ?? '').length > 1) {
-    return { ok: false, message: '子项分数最多保留 1 位小数' };
+    return { ok: false, message: '评分最多保留 1 位小数' };
   }
   return { ok: true, value: Math.round(parsed * 10) / 10 };
 }
@@ -535,14 +567,14 @@ export function buildXlsxPreviewSrcDoc(fileName, sheets = [], zoomScale = 1) {
     .sheet-panel.active { display: block; }
     .sheet-head { padding: 10px 12px; font-weight: 700; color: #4b2b7f; border-bottom: 1px solid #f0e7fb; background: linear-gradient(180deg, #fcf9ff 0%, #f7f1ff 100%); }
     .sheet-body { overflow: auto; padding: 12px; font-size: calc(13px * var(--font-scale)); line-height: 1.55; }
-    .sheet-body table { border-collapse: collapse; min-width: 100%; }
-    .sheet-body td, .sheet-body th { border: 1px solid #d8c6f4; padding: 6px 8px; vertical-align: top; }
+    .sheet-body table { border-collapse: collapse; width: max-content; min-width: 100%; }
+    .sheet-body td, .sheet-body th { border: 1px solid #d8c6f4; padding: 6px 8px; vertical-align: top; white-space: nowrap; }
     .sheet-body th { background: #f5edff; }
     .empty, .empty-sheet { padding: 18px; color: #7b68a6; }
   </style>
 </head>
 <body>
-  <div class="hint">当前为 Excel 在线预览，可切换工作表查看。</div>
+  <div class="hint">当前为 Excel 在线预览，可切换工作表并横向滚动查看。</div>
   <div class="tabs">${tabsHtml}</div>
   <div class="panels">${panelsHtml}</div>
   <script>
@@ -666,6 +698,7 @@ export default function JudgeReviewPage({
   const [previewXlsxSheets, setPreviewXlsxSheets] = useState([]);
   const [previewTextContent, setPreviewTextContent] = useState('');
   const [previewDownloadUrl, setPreviewDownloadUrl] = useState('');
+  const [previewDownloadName, setPreviewDownloadName] = useState('');
   const [selectedAttachmentKey, setSelectedAttachmentKey] = useState('');
   const [previewZoom, setPreviewZoom] = useState(100);
   const [reviewContext, setReviewContext] = useState(null);
@@ -684,14 +717,29 @@ export default function JudgeReviewPage({
     () => rows.find((item) => Number(item.submission_id) === Number(selectedSubmissionId)) || null,
     [rows, selectedSubmissionId]
   );
+  const selectedWorkDescription = useMemo(
+    () => (
+      normalizeWorkDescription(selectedRow?.work_description)
+      || normalizeWorkDescription(reviewContext?.submission_work_description)
+    ),
+    [selectedRow?.work_description, reviewContext?.submission_work_description]
+  );
   const selectedReviewed = Boolean(selectedRow?.reviewed || reviewContext?.review);
   const scoringMode = String(reviewContext?.competition_scoring_settings?.settings?.mode_key || 'single_score')
     .trim()
     .toLowerCase() || 'single_score';
+  const competitionDisplayName = useMemo(() => {
+    const name = String(competition?.name || '').trim();
+    if (name) return name;
+    return normalizedCompetitionId ? `比赛 #${normalizedCompetitionId}` : '比赛';
+  }, [competition?.name, normalizedCompetitionId]);
   const rubricConfig = reviewContext?.competition_scoring_settings?.rubric_config || null;
   const rubricDimensions = Array.isArray(rubricConfig?.dimensions) ? rubricConfig.dimensions : [];
   const rubricFatalCriteria = Array.isArray(rubricConfig?.fatal_criteria) ? rubricConfig.fatal_criteria : [];
-  const rubricCapCriteria = Array.isArray(rubricConfig?.cap_criteria) ? rubricConfig.cap_criteria : [];
+  const quantitativeReviewItems = useMemo(
+    () => listQuantitativeReviewItems(rubricDimensions),
+    [rubricDimensions]
+  );
   const attachmentItems = Array.isArray(reviewContext?.attachments) ? reviewContext.attachments : [];
   const attachmentNodes = useMemo(
     () => attachmentItems.map((item, index) => ({ ...item, __node_key: getAttachmentNodeKey(item, index) })),
@@ -701,6 +749,7 @@ export default function JudgeReviewPage({
     () => attachmentNodes.find((item) => String(item?.__node_key || '').trim() === String(selectedAttachmentKey || '').trim()) || null,
     [attachmentNodes, selectedAttachmentKey]
   );
+  const selectedWorkDescriptionNode = String(selectedAttachmentKey || '').trim() === WORK_DESCRIPTION_NODE_KEY;
   const selectedReviewedScore = reviewContext?.review?.score;
   const selectedReviewedGrade = reviewContext?.review?.final_grade;
   const reviewContextCanEdit = Boolean(reviewContext?.can_edit);
@@ -771,7 +820,6 @@ export default function JudgeReviewPage({
     ),
     [rubricDimensions, rubricConfig, quantitativeItemScores, quantitativeFatalHits]
   );
-  const quantitativeCapHits = quantitativeSnapshot.capHits;
   const quantitativeHasInput = quantitativeSnapshot.hasAnyInput;
   const quantitativeDisplayTotalScore = quantitativeSnapshot.fatalTriggered
     ? quantitativeSnapshot.finalScore
@@ -784,9 +832,16 @@ export default function JudgeReviewPage({
     ),
     [rubricDimensions]
   );
+  const expectedDimensionCodes = useMemo(() => {
+    const rubricKey = String(rubricConfig?.rubric_key || '').trim().toLowerCase();
+    if (rubricKey === 'history_paper_quantitative') {
+      return ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+    }
+    return rubricDimensionCodes;
+  }, [rubricConfig?.rubric_key, rubricDimensionCodes]);
   const missingExpectedDimensionCodes = useMemo(
-    () => ['D', 'E', 'F', 'G'].filter((code) => !rubricDimensionCodes.includes(code)),
-    [rubricDimensionCodes]
+    () => expectedDimensionCodes.filter((code) => !rubricDimensionCodes.includes(code)),
+    [expectedDimensionCodes, rubricDimensionCodes]
   );
 
   useEffect(() => {
@@ -897,6 +952,7 @@ export default function JudgeReviewPage({
       if (previewDownloadUrl) URL.revokeObjectURL(previewDownloadUrl);
       setPreviewUrl('');
       setPreviewName('');
+      setPreviewDownloadName('');
       setPreviewError('');
       setPreviewDocxHtml('');
       setPreviewDocxWarnings([]);
@@ -917,6 +973,7 @@ export default function JudgeReviewPage({
     if (previewDownloadUrl) URL.revokeObjectURL(previewDownloadUrl);
     setPreviewUrl('');
     setPreviewName('');
+    setPreviewDownloadName('');
     setPreviewError('');
     setPreviewDocxHtml('');
     setPreviewDocxWarnings([]);
@@ -941,12 +998,42 @@ export default function JudgeReviewPage({
 
         const review = contextData?.review || null;
         const detailJson = review?.detail_json || {};
+        const contextRubricConfig = contextData?.competition_scoring_settings?.rubric_config || null;
+        const contextRubricDimensions = Array.isArray(contextRubricConfig?.dimensions) ? contextRubricConfig.dimensions : [];
         const initialItemScores = {};
-        (Array.isArray(detailJson?.item_scores) ? detailJson.item_scores : []).forEach((item) => {
-          const code = String(item?.code || '').trim();
-          if (!code) return;
-          initialItemScores[code.toUpperCase()] = item?.score !== undefined && item?.score !== null ? String(item.score) : '';
-        });
+        const detailDimensionScores = Array.isArray(detailJson?.dimension_totals) ? detailJson.dimension_totals : [];
+        if (detailDimensionScores.length) {
+          detailDimensionScores.forEach((item) => {
+            const code = String(item?.code || '').trim();
+            if (!code) return;
+            initialItemScores[code.toUpperCase()] = item?.score !== undefined && item?.score !== null ? String(item.score) : '';
+          });
+        } else {
+          const bucketedScores = {};
+          (Array.isArray(detailJson?.item_scores) ? detailJson.item_scores : []).forEach((item) => {
+            const code = String(item?.code || '').trim().toUpperCase();
+            if (!code) return;
+            const dimensionCode = code.charAt(0);
+            if (!dimensionCode) return;
+            const parsed = Number(item?.score ?? 0);
+            if (!Number.isFinite(parsed)) return;
+            bucketedScores[dimensionCode] = round2((bucketedScores[dimensionCode] || 0) + parsed);
+          });
+          contextRubricDimensions.forEach((dimension) => {
+            const dimensionCode = String(dimension?.code || '').trim().toUpperCase();
+            if (!dimensionCode) return;
+            if (Object.prototype.hasOwnProperty.call(bucketedScores, dimensionCode)) {
+              initialItemScores[dimensionCode] = String(bucketedScores[dimensionCode]);
+            }
+          });
+          if (!Object.keys(initialItemScores).length) {
+            (Array.isArray(detailJson?.item_scores) ? detailJson.item_scores : []).forEach((item) => {
+              const code = String(item?.code || '').trim();
+              if (!code) return;
+              initialItemScores[code.toUpperCase()] = item?.score !== undefined && item?.score !== null ? String(item.score) : '';
+            });
+          }
+        }
         setReviewContext(contextData);
         setScoreInput(review?.score !== undefined && review?.score !== null ? String(review.score) : '');
         setCommentInput(String(review?.comment || ''));
@@ -991,7 +1078,12 @@ export default function JudgeReviewPage({
         }
         const contextAttachments = Array.isArray(contextData?.attachments) ? contextData.attachments : [];
         const defaultAttachment = pickDefaultAttachment(contextAttachments);
-        setSelectedAttachmentKey(defaultAttachment ? getAttachmentNodeKey(defaultAttachment, 0) : '');
+        const contextWorkDescription = normalizeWorkDescription(contextData?.submission_work_description);
+        setSelectedAttachmentKey(
+          defaultAttachment
+            ? getAttachmentNodeKey(defaultAttachment, 0)
+            : (contextWorkDescription ? WORK_DESCRIPTION_NODE_KEY : '')
+        );
       } catch (error) {
         if (!cancelled) {
           if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -1022,25 +1114,50 @@ export default function JudgeReviewPage({
   useEffect(() => {
     if (!normalizedCompetitionId || !selectedSubmissionId) return;
 
-    if (!attachmentNodes.length) {
+    const normalizedSelectedAttachmentKey = String(selectedAttachmentKey || '').trim();
+    if (normalizedSelectedAttachmentKey === WORK_DESCRIPTION_NODE_KEY) {
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       if (previewDownloadUrl) URL.revokeObjectURL(previewDownloadUrl);
       setPreviewUrl('');
-      setPreviewName('');
+      setPreviewName('作品简介');
+      setPreviewDownloadName('');
       setPreviewDocxHtml('');
       setPreviewDocxWarnings([]);
       setPreviewXlsxSheets([]);
       setPreviewTextContent('');
       setPreviewDownloadUrl('');
-      setPreviewError('该作品未提供可在线预览附件');
+      setPreviewError('');
+      setDetailLoading(false);
       return;
     }
 
-    const normalizedSelectedAttachmentKey = String(selectedAttachmentKey || '').trim();
+    if (!attachmentNodes.length) {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      if (previewDownloadUrl) URL.revokeObjectURL(previewDownloadUrl);
+      setPreviewUrl('');
+      setPreviewName(selectedWorkDescription ? '作品简介' : '');
+      setPreviewDownloadName('');
+      setPreviewDocxHtml('');
+      setPreviewDocxWarnings([]);
+      setPreviewXlsxSheets([]);
+      setPreviewTextContent('');
+      setPreviewDownloadUrl('');
+      if (selectedWorkDescription) {
+        setPreviewError('');
+        setSelectedAttachmentKey(WORK_DESCRIPTION_NODE_KEY);
+        setDetailLoading(false);
+      } else {
+        setPreviewError('该作品未提供可在线预览附件');
+      }
+      return;
+    }
+
     const activeAttachment = attachmentNodes.find((item) => String(item?.__node_key || '').trim() === normalizedSelectedAttachmentKey) || null;
     if (!activeAttachment) {
       const defaultAttachment = pickDefaultAttachment(attachmentNodes);
-      const fallbackKey = defaultAttachment ? String(defaultAttachment.__node_key || '').trim() : '';
+      const fallbackKey = defaultAttachment
+        ? String(defaultAttachment.__node_key || '').trim()
+        : (selectedWorkDescription ? WORK_DESCRIPTION_NODE_KEY : '');
       if (!fallbackKey) return;
       if (fallbackKey !== normalizedSelectedAttachmentKey) {
         setSelectedAttachmentKey(fallbackKey);
@@ -1052,21 +1169,47 @@ export default function JudgeReviewPage({
     (async () => {
       setDetailLoading(true);
       setPreviewError('');
+      let downloadResult = null;
+      let previewResult = null;
+      let downloadFailure = null;
+      let previewFailure = null;
+      let downloadUrlCreated = false;
       try {
-        const activeExt = String(activeAttachment?.attachment_ext || '').trim().toLowerCase().replace(/^\./, '') || 'pdf';
-        const requestedAttachmentExt = activeExt === 'docx' ? 'pdf' : activeExt;
-        const attachmentResult = await getAssignedSubmissionAttachmentBlob(
+        const activeExt = canonicalAttachmentExt(activeAttachment?.attachment_ext || '') || 'pdf';
+        const attachmentPlan = resolveJudgeReviewAttachmentRequestPlan(activeExt);
+        const attachmentKey = String(activeAttachment?.attachment_key || '').trim();
+
+        const downloadRequest = getAssignedSubmissionAttachmentBlob(
           normalizedCompetitionId,
           selectedSubmissionId,
           {
             requestId: createRequestId(),
-            disposition: activeExt === 'xlsx' ? 'attachment' : 'inline',
-            attachmentExt: requestedAttachmentExt,
-            attachmentKey: String(activeAttachment?.attachment_key || '').trim(),
+            disposition: attachmentPlan.downloadDisposition,
+            attachmentExt: attachmentPlan.downloadAttachmentExt,
+            attachmentKey,
           }
         );
+        const previewRequest = attachmentPlan.needsSeparatePreviewRequest
+          ? getAssignedSubmissionAttachmentBlob(
+              normalizedCompetitionId,
+              selectedSubmissionId,
+              {
+                requestId: createRequestId(),
+                disposition: attachmentPlan.previewDisposition,
+                attachmentExt: attachmentPlan.previewAttachmentExt,
+                attachmentKey,
+              }
+            )
+          : Promise.resolve(null);
+
+        const [downloadSettled, previewSettled] = await Promise.allSettled([downloadRequest, previewRequest]);
 
         if (cancelled) return;
+        downloadResult = downloadSettled.status === 'fulfilled' ? downloadSettled.value : null;
+        previewResult = previewSettled.status === 'fulfilled' ? previewSettled.value : null;
+        downloadFailure = downloadSettled.status === 'rejected' ? downloadSettled.reason : null;
+        previewFailure = previewSettled.status === 'rejected' ? previewSettled.reason : null;
+
         if (previewUrl) URL.revokeObjectURL(previewUrl);
         if (previewDownloadUrl) URL.revokeObjectURL(previewDownloadUrl);
         setPreviewUrl('');
@@ -1075,35 +1218,46 @@ export default function JudgeReviewPage({
         setPreviewXlsxSheets([]);
         setPreviewTextContent('');
         setPreviewDownloadUrl('');
+        setPreviewDownloadName('');
 
-        const blob = attachmentResult?.blob || null;
-        const fileName = attachmentResult?.fileName || activeAttachment?.attachment_name || `submission_${selectedSubmissionId}.${activeExt}`;
-        const contentType = attachmentResult?.contentType || '';
-        const previewFormat = String(attachmentResult?.previewFormat || '').trim().toLowerCase().replace(/^\./, '');
+        const downloadFileName = downloadResult?.fileName || activeAttachment?.attachment_name || `submission_${selectedSubmissionId}.${activeExt}`;
+        const previewSourceResult = attachmentPlan.needsSeparatePreviewRequest ? previewResult : downloadResult;
+        const previewFileName = previewSourceResult?.fileName || downloadFileName;
+        if (downloadResult?.blob) {
+          const downloadUrl = URL.createObjectURL(downloadResult.blob);
+          downloadUrlCreated = true;
+          setPreviewDownloadUrl(downloadUrl);
+          setPreviewDownloadName(downloadFileName);
+        }
+
+        const blob = previewSourceResult?.blob || null;
+        const contentType = previewSourceResult?.contentType || '';
+        const previewFormat = String(previewSourceResult?.previewFormat || '').trim().toLowerCase().replace(/^\./, '');
         const renderExt = resolveAttachmentPreviewExt({
           activeExt,
           contentType,
-          fileName,
+          fileName: previewFileName,
           previewFormat,
         });
         if (!blob) {
-          setPreviewName(fileName);
-          setPreviewError('附件加载失败，请稍后重试');
+          setPreviewName(previewFileName);
+          if (attachmentPlan.needsSeparatePreviewRequest && downloadResult?.blob) {
+            setPreviewError(buildOfficePreviewFailureMessage(activeExt));
+          } else {
+            setPreviewError(getUserFriendlyErrorText(downloadFailure || previewFailure, '加载作品附件失败'));
+          }
           return;
         }
 
-        const downloadUrl = URL.createObjectURL(blob);
-        setPreviewDownloadUrl(downloadUrl);
-
         if (renderExt === 'pdf') {
-          if (!isPdfContent(contentType, fileName)) {
-            setPreviewName(fileName);
-            setPreviewError('该作品未提供可在线预览的 PDF，请下载后查看。');
+          if (!isPdfContent(contentType, previewFileName)) {
+            setPreviewName(previewFileName);
+            setPreviewError('该作品未提供可在线预览的 PDF，请点击“下载原件”查看。');
             return;
           }
           const url = URL.createObjectURL(blob);
           setPreviewUrl(url);
-          setPreviewName(fileName);
+          setPreviewName(previewFileName);
           setPreviewError('');
           return;
         }
@@ -1111,7 +1265,7 @@ export default function JudgeReviewPage({
         if (renderExt === 'docx') {
           const { html, warnings } = await convertDocxBlobToHtml(blob);
           if (cancelled) return;
-          setPreviewName(fileName);
+          setPreviewName(previewFileName);
           setPreviewDocxHtml(html);
           setPreviewDocxWarnings(warnings);
           setPreviewXlsxSheets([]);
@@ -1122,7 +1276,7 @@ export default function JudgeReviewPage({
         if (isSpreadsheetPreview(renderExt, contentType)) {
           const sheets = await convertSpreadsheetBlobToSheets(blob);
           if (cancelled) return;
-          setPreviewName(fileName);
+          setPreviewName(previewFileName);
           setPreviewXlsxSheets(sheets);
           setPreviewDocxHtml('');
           setPreviewDocxWarnings([]);
@@ -1134,32 +1288,37 @@ export default function JudgeReviewPage({
         if (canPreviewAsText(renderExt, contentType)) {
           const text = await decodeAttachmentBlobText(blob, { contentType, fileName });
           if (cancelled) return;
-          setPreviewName(fileName);
+          setPreviewName(previewFileName);
           setPreviewXlsxSheets([]);
           setPreviewTextContent(text || '');
           setPreviewError('');
           return;
         }
 
-        setPreviewName(fileName);
+        setPreviewName(previewFileName);
         setPreviewXlsxSheets([]);
         if (activeExt === 'xlsx') {
-          setPreviewError('该作品为 Excel 附件，暂不支持在线预览，请点击“下载附件”查看。');
+          setPreviewError('该作品为 Excel 附件，暂不支持在线预览，请点击“下载原件”查看。');
         } else {
-          setPreviewError('该附件暂不支持在线预览，请点击“下载附件”查看。');
+          setPreviewError('该附件暂不支持在线预览，请点击“下载原件”查看。');
         }
       } catch (error) {
         if (!cancelled) {
           if (previewUrl) URL.revokeObjectURL(previewUrl);
-          if (previewDownloadUrl) URL.revokeObjectURL(previewDownloadUrl);
+          if (!downloadUrlCreated && previewDownloadUrl) URL.revokeObjectURL(previewDownloadUrl);
           setPreviewUrl('');
           setPreviewName('');
-          setPreviewError(getUserFriendlyErrorText(error, '加载作品附件失败'));
+          setPreviewError(downloadUrlCreated
+            ? '预览加载失败，请点击“下载原件”下载原文件。'
+            : getUserFriendlyErrorText(error, '加载作品附件失败'));
           setPreviewDocxHtml('');
           setPreviewDocxWarnings([]);
           setPreviewXlsxSheets([]);
           setPreviewTextContent('');
-          setPreviewDownloadUrl('');
+          if (!downloadUrlCreated) {
+            setPreviewDownloadUrl('');
+            setPreviewDownloadName('');
+          }
         }
       } finally {
         if (!cancelled) setDetailLoading(false);
@@ -1169,13 +1328,13 @@ export default function JudgeReviewPage({
     return () => {
       cancelled = true;
     };
-  }, [normalizedCompetitionId, selectedSubmissionId, attachmentNodes, selectedAttachmentKey]);
+  }, [normalizedCompetitionId, selectedSubmissionId, attachmentNodes, selectedAttachmentKey, selectedWorkDescription]);
 
   const handleDownloadPreviewAttachment = () => {
     if (!previewDownloadUrl) return;
     const link = document.createElement('a');
     link.href = previewDownloadUrl;
-    link.download = previewName || 'submission';
+    link.download = previewDownloadName || previewName || selectedAttachmentNode?.attachment_name || 'submission';
     link.rel = 'noopener noreferrer';
     document.body.appendChild(link);
     link.click();
@@ -1209,17 +1368,14 @@ export default function JudgeReviewPage({
     if (!selectedRow) return;
     const isQuantitativeMode = scoringMode === 'history_paper_quantitative';
     if (isQuantitativeMode) {
-      for (const dimension of rubricDimensions) {
-        const items = Array.isArray(dimension?.items) ? dimension.items : [];
-        for (const item of items) {
-          const code = String(item?.code || '').trim().toUpperCase();
-          if (!code) continue;
-          const maxScore = Number(item?.max_score || 0);
-          const normalized = normalizeItemScore(quantitativeItemScores[code], maxScore);
-          if (!normalized.ok) {
-            setMessage?.({ type: 'warning', text: `${code}：${normalized.message}` });
-            return;
-          }
+      for (const item of quantitativeReviewItems) {
+        const code = String(item?.code || '').trim().toUpperCase();
+        if (!code) continue;
+        const maxScore = Number(item?.maxScore || 0);
+        const normalized = normalizeItemScore(quantitativeItemScores[code], maxScore);
+        if (!normalized.ok) {
+          setMessage?.({ type: 'warning', text: `${code}：${normalized.message}` });
+          return;
         }
       }
     } else {
@@ -1281,48 +1437,44 @@ export default function JudgeReviewPage({
     if (isQuantitativeMode) {
       const itemScores = [];
       const allowPartialByFatal = quantitativeFatalHits.length > 0;
-      for (const dimension of rubricDimensions) {
-        const items = Array.isArray(dimension?.items) ? dimension.items : [];
-        for (const item of items) {
-          const code = String(item?.code || '').trim().toUpperCase();
-          if (!code) continue;
-          const maxScore = Number(item?.max_score || 0);
-          const rawScore = String(quantitativeItemScores[code] ?? '').trim();
-          if (!rawScore) {
-            if (allowPartialByFatal) continue;
-            const validationError = {
-              ok: false,
-              fieldType: 'quantitative',
-              code,
-              message: `${code} 尚未评分，请先填写后再提交。`,
-            };
-            setReviewFieldError(validationError);
-            setMessage?.({ type: 'warning', text: validationError.message });
-            focusReviewField(validationError.fieldType, validationError.code);
-            return;
-          }
-          const normalized = normalizeItemScore(rawScore, maxScore);
-          if (!normalized.ok) {
-            const validationError = {
-              ok: false,
-              fieldType: 'quantitative',
-              code,
-              message: `${code}：${normalized.message}`,
-            };
-            setReviewFieldError(validationError);
-            setMessage?.({ type: 'warning', text: validationError.message });
-            focusReviewField(validationError.fieldType, validationError.code);
-            return;
-          }
-          itemScores.push({ code, score: normalized.value });
+      for (const item of quantitativeReviewItems) {
+        const code = String(item?.code || '').trim().toUpperCase();
+        if (!code) continue;
+        const maxScore = Number(item?.maxScore || 0);
+        const rawScore = String(quantitativeItemScores[code] ?? '').trim();
+        if (!rawScore) {
+          if (allowPartialByFatal) continue;
+          const validationError = {
+            ok: false,
+            fieldType: 'quantitative',
+            code,
+            message: `${code} 尚未评分，请先填写后再提交。`,
+          };
+          setReviewFieldError(validationError);
+          setMessage?.({ type: 'warning', text: validationError.message });
+          focusReviewField(validationError.fieldType, validationError.code);
+          return;
         }
+        const normalized = normalizeItemScore(rawScore, maxScore);
+        if (!normalized.ok) {
+          const validationError = {
+            ok: false,
+            fieldType: 'quantitative',
+            code,
+            message: `${code}：${normalized.message}`,
+          };
+          setReviewFieldError(validationError);
+          setMessage?.({ type: 'warning', text: validationError.message });
+          focusReviewField(validationError.fieldType, validationError.code);
+          return;
+        }
+        itemScores.push({ code, score: normalized.value });
       }
       payload = {
         ...payload,
         detail_json: {
           item_scores: itemScores,
           fatal_hits: quantitativeFatalHits,
-          cap_hits: quantitativeCapHits,
         },
       };
     } else {
@@ -1422,19 +1574,35 @@ export default function JudgeReviewPage({
             px: { xs: 1.4, md: 2.2 },
             py: 1.1,
             borderBottom: '1px solid #e9def8',
-            display: 'flex',
+            display: 'grid',
+            gridTemplateColumns: { xs: 'minmax(0, 1fr)', md: 'auto minmax(0, 1fr) auto' },
             alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 1,
+            rowGap: { xs: 0.75, md: 0 },
+            columnGap: 1,
             background: 'linear-gradient(90deg, #ffffff 0%, #f4ecff 100%)',
           }}
         >
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
             <Typography variant="h6" sx={{ fontWeight: 700, color: '#3f2467' }}>
               数智文献处理平台比赛 评审工作台
             </Typography>
           </Stack>
-          <Stack direction="row" spacing={0.8}>
+          <Box sx={{ minWidth: 0, display: 'flex', justifyContent: { xs: 'flex-start', md: 'center' } }}>
+            <Typography
+              variant="subtitle1"
+              sx={{
+                fontWeight: 800,
+                color: '#7b4ec1',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                maxWidth: '100%',
+              }}
+            >
+              比赛：{competitionDisplayName}
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={0.8} sx={{ flexWrap: 'wrap', justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
             <Chip
               size="small"
               color="secondary"
@@ -1445,7 +1613,7 @@ export default function JudgeReviewPage({
               size="small"
               color={scoringMode === 'history_paper_quantitative' ? 'warning' : 'default'}
               variant="outlined"
-              label={scoringMode === 'history_paper_quantitative' ? '量化评分模式' : '单分模式'}
+              label={scoringMode === 'history_paper_quantitative' ? '维度评分模式' : '单分模式'}
             />
           </Stack>
         </Box>
@@ -1536,6 +1704,8 @@ export default function JudgeReviewPage({
                       const selected = Number(selectedSubmissionId) === submissionId;
                       const expanded = Number(expandedSubmissionId) === submissionId;
                       const listNo = index + 1;
+                      const workDescription = normalizeWorkDescription(row.work_description);
+                      const descriptionNodeSelected = selected && selectedWorkDescriptionNode;
                       return (
                         <Box
                           key={row.assignment_id || row.submission_id}
@@ -1605,74 +1775,107 @@ export default function JudgeReviewPage({
                                 {expanded ? <ExpandLessRoundedIcon fontSize="small" /> : <ExpandMoreRoundedIcon fontSize="small" />}
                               </Box>
                             </Stack>
-                          </ListItemButton>
-                          <Collapse in={expanded} timeout="auto" unmountOnExit>
-                            <Box
-                              sx={{
-                                px: 0.9,
-                                py: 0.8,
-                                background: 'linear-gradient(180deg, #fcfaff 0%, #f8f2ff 100%)',
-                                borderTop: '1px solid #ece0fb',
-                              }}
-                            >
-                              {detailLoading && selected && Number(selectedSubmissionId) === submissionId ? (
-                                <Stack alignItems="center" justifyContent="center" spacing={0.8} sx={{ py: 1.5 }}>
-                                  <CircularProgress size={18} />
-                                  <Typography variant="caption" color="text.secondary">加载节点中...</Typography>
-                                </Stack>
-                              ) : attachmentNodes.length ? (
-                                <Stack spacing={0.45}>
-                                  {attachmentNodes.map((item, attachmentIndex) => {
-                                    const key = String(item?.__node_key || '').trim();
-                                    const extLabel = String(item?.attachment_ext || '').trim().toUpperCase();
-                                    const nodeSelected = String(selectedAttachmentKey || '').trim() === key;
-                                    return (
+                            </ListItemButton>
+                            <Collapse in={expanded} timeout="auto" unmountOnExit>
+                              <Box
+                                sx={{
+                                  px: 0.9,
+                                  py: 0.8,
+                                  background: 'linear-gradient(180deg, #fcfaff 0%, #f8f2ff 100%)',
+                                  borderTop: '1px solid #ece0fb',
+                                }}
+                              >
+                                {detailLoading && selected && Number(selectedSubmissionId) === submissionId ? (
+                                  <Stack alignItems="center" justifyContent="center" spacing={0.8} sx={{ py: 1.5 }}>
+                                    <CircularProgress size={18} />
+                                    <Typography variant="caption" color="text.secondary">加载节点中...</Typography>
+                                  </Stack>
+                                ) : (workDescription || attachmentNodes.length) ? (
+                                  <Stack spacing={0.45}>
+                                    {workDescription ? (
                                       <ListItemButton
-                                        key={key}
-                                        selected={nodeSelected}
+                                        selected={descriptionNodeSelected}
                                         onClick={() => {
                                           setSelectedSubmissionId(submissionId);
                                           setExpandedSubmissionId(submissionId);
-                                          setSelectedAttachmentKey(key);
+                                          setSelectedAttachmentKey(WORK_DESCRIPTION_NODE_KEY);
                                         }}
                                         sx={{
                                           borderRadius: 1.1,
                                           pl: 1.1,
                                           pr: 1,
-                                          py: 0.7,
-                                          border: nodeSelected ? '1px solid #8d63cf' : '1px solid #eee4fb',
-                                          background: nodeSelected ? '#f4ecff' : '#fff',
+                                          py: 0.85,
+                                          border: descriptionNodeSelected ? '1px solid #8d63cf' : '1px solid #eee4fb',
+                                          background: descriptionNodeSelected ? '#f4ecff' : '#fff',
                                           '&.Mui-selected': {
                                             bgcolor: '#f4ecff',
                                           },
                                           '&:hover': {
-                                            backgroundColor: nodeSelected ? '#f0e6ff' : '#faf7ff',
+                                            backgroundColor: descriptionNodeSelected ? '#f0e6ff' : '#faf7ff',
                                           },
                                         }}
                                       >
                                         <Stack direction="row" alignItems="center" spacing={1} sx={{ width: '100%', minWidth: 0 }}>
-                                          <DescriptionRoundedIcon sx={{ fontSize: 18, color: nodeSelected ? '#7b4dc2' : '#a28bcf', flexShrink: 0 }} />
-                                          <Typography
-                                            variant="body2"
-                                            sx={{
-                                              color: '#4e2f7f',
-                                              whiteSpace: 'nowrap',
-                                              overflow: 'hidden',
-                                              textOverflow: 'ellipsis',
-                                            }}
-                                          >
-                                            {`${attachmentIndex + 1}. ${item?.attachment_name || '未命名附件'}${extLabel ? `（${extLabel}）` : ''}`}
-                                          </Typography>
+                                          <DescriptionRoundedIcon sx={{ fontSize: 18, color: descriptionNodeSelected ? '#7b4dc2' : '#a28bcf', flexShrink: 0 }} />
+                                          <Box sx={{ minWidth: 0 }}>
+                                            <Typography variant="body2" sx={{ color: '#4e2f7f', fontWeight: 700 }}>
+                                              作品简介
+                                            </Typography>
+                                          </Box>
                                         </Stack>
                                       </ListItemButton>
-                                    );
-                                  })}
-                                </Stack>
-                              ) : (
-                                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', px: 0.5, py: 0.4 }}>
-                                  该作品暂无附件节点
-                                </Typography>
-                              )}
+                                    ) : null}
+                                    {attachmentNodes.map((item, attachmentIndex) => {
+                                      const key = String(item?.__node_key || '').trim();
+                                      const extLabel = String(item?.attachment_ext || '').trim().toUpperCase();
+                                      const nodeSelected = String(selectedAttachmentKey || '').trim() === key;
+                                      return (
+                                        <ListItemButton
+                                          key={key}
+                                          selected={nodeSelected}
+                                          onClick={() => {
+                                            setSelectedSubmissionId(submissionId);
+                                            setExpandedSubmissionId(submissionId);
+                                            setSelectedAttachmentKey(key);
+                                          }}
+                                          sx={{
+                                            borderRadius: 1.1,
+                                            pl: 1.1,
+                                            pr: 1,
+                                            py: 0.7,
+                                            border: nodeSelected ? '1px solid #8d63cf' : '1px solid #eee4fb',
+                                            background: nodeSelected ? '#f4ecff' : '#fff',
+                                            '&.Mui-selected': {
+                                              bgcolor: '#f4ecff',
+                                            },
+                                            '&:hover': {
+                                              backgroundColor: nodeSelected ? '#f0e6ff' : '#faf7ff',
+                                            },
+                                          }}
+                                        >
+                                          <Stack direction="row" alignItems="center" spacing={1} sx={{ width: '100%', minWidth: 0 }}>
+                                            <DescriptionRoundedIcon sx={{ fontSize: 18, color: nodeSelected ? '#7b4dc2' : '#a28bcf', flexShrink: 0 }} />
+                                            <Typography
+                                              variant="body2"
+                                              sx={{
+                                                color: '#4e2f7f',
+                                                whiteSpace: 'nowrap',
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                              }}
+                                            >
+                                              {`${attachmentIndex + 1}. ${item?.attachment_name || '未命名附件'}${extLabel ? `（${extLabel}）` : ''}`}
+                                            </Typography>
+                                          </Stack>
+                                        </ListItemButton>
+                                      );
+                                    })}
+                                  </Stack>
+                                ) : (
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', px: 0.5, py: 0.4 }}>
+                                    该作品暂无简介或附件节点
+                                  </Typography>
+                                )}
                             </Box>
                           </Collapse>
                         </Box>
@@ -1697,55 +1900,59 @@ export default function JudgeReviewPage({
               }}
             >
               <Stack direction="row" justifyContent="space-between" alignItems="flex-start" sx={{ px: 0.5, pb: 1 }} spacing={1}>
-                <Box sx={{ minWidth: 0 }}>
-                  <Typography variant="subtitle2" sx={{ color: '#4e2f7f', fontWeight: 700 }}>
-                    {selectedRow ? `作品：${selectedRow.title || `#${selectedRow.submission_id}`}` : '请选择作品'}
-                  </Typography>
-                  {selectedRow ? (
-                    <Typography variant="caption" sx={{ display: 'block', mt: 0.2, color: '#7b68a6' }}>
-                      {previewName || selectedAttachmentNode?.attachment_name ? `当前附件：${previewName || selectedAttachmentNode?.attachment_name}` : '当前附件：-'}
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="subtitle2" sx={{ color: '#4e2f7f', fontWeight: 700 }}>
+                      {selectedRow ? `作品：${selectedRow.title || `#${selectedRow.submission_id}`}` : '请选择作品'}
                     </Typography>
+                    {selectedRow ? (
+                      <Typography variant="caption" sx={{ display: 'block', mt: 0.2, color: '#7b68a6' }}>
+                        {selectedWorkDescriptionNode
+                          ? '当前内容：作品简介'
+                          : (previewName || selectedAttachmentNode?.attachment_name ? `当前附件：${previewName || selectedAttachmentNode?.attachment_name}` : '当前附件：-')}
+                      </Typography>
+                    ) : null}
+                  </Box>
+                  {!selectedWorkDescriptionNode ? (
+                    <Stack direction="row" alignItems="center" spacing={1} sx={{ flexShrink: 0 }}>
+                      <Typography variant="caption" sx={{ color: '#7b68a6', minWidth: 40, textAlign: 'right' }}>
+                        {previewZoomPercent}%
+                      </Typography>
+                      <Slider
+                        size="small"
+                        value={previewZoomPercent}
+                        min={50}
+                        max={200}
+                        step={10}
+                        onChange={(_, value) => {
+                          const nextValue = Array.isArray(value) ? value[0] : value;
+                          setPreviewZoom(clampPreviewZoom(nextValue));
+                        }}
+                        sx={{ width: 96 }}
+                        aria-label="附件预览缩放"
+                      />
+                      <Button
+                        size="small"
+                        variant="text"
+                        onClick={() => setPreviewZoom((prev) => clampPreviewZoom(prev - 10))}
+                        sx={{ minWidth: 34, px: 1 }}
+                      >
+                        A-
+                      </Button>
+                      <Button
+                        size="small"
+                        variant="text"
+                        onClick={() => setPreviewZoom((prev) => clampPreviewZoom(prev + 10))}
+                        sx={{ minWidth: 34, px: 1 }}
+                      >
+                        A+
+                      </Button>
+                      {previewDownloadUrl ? (
+                        <Button size="small" variant="outlined" onClick={handleDownloadPreviewAttachment}>
+                          下载原件
+                        </Button>
+                      ) : null}
+                    </Stack>
                   ) : null}
-                </Box>
-                <Stack direction="row" alignItems="center" spacing={1} sx={{ flexShrink: 0 }}>
-                  <Typography variant="caption" sx={{ color: '#7b68a6', minWidth: 40, textAlign: 'right' }}>
-                    {previewZoomPercent}%
-                  </Typography>
-                  <Slider
-                    size="small"
-                    value={previewZoomPercent}
-                    min={50}
-                    max={200}
-                    step={10}
-                    onChange={(_, value) => {
-                      const nextValue = Array.isArray(value) ? value[0] : value;
-                      setPreviewZoom(clampPreviewZoom(nextValue));
-                    }}
-                    sx={{ width: 96 }}
-                    aria-label="附件预览缩放"
-                  />
-                  <Button
-                    size="small"
-                    variant="text"
-                    onClick={() => setPreviewZoom((prev) => clampPreviewZoom(prev - 10))}
-                    sx={{ minWidth: 34, px: 1 }}
-                  >
-                    A-
-                  </Button>
-                  <Button
-                    size="small"
-                    variant="text"
-                    onClick={() => setPreviewZoom((prev) => clampPreviewZoom(prev + 10))}
-                    sx={{ minWidth: 34, px: 1 }}
-                  >
-                    A+
-                  </Button>
-                  {previewDownloadUrl ? (
-                    <Button size="small" variant="outlined" onClick={handleDownloadPreviewAttachment}>
-                      下载附件
-                    </Button>
-                  ) : null}
-                </Stack>
               </Stack>
               <Box
                 sx={{
@@ -1756,16 +1963,64 @@ export default function JudgeReviewPage({
                   minHeight: { xs: 420, md: PREVIEW_MIN_HEIGHT_DESKTOP },
                 }}
               >
-                {detailLoading ? (
-                  <Stack alignItems="center" justifyContent="center" sx={{ minHeight: { xs: 420, md: PREVIEW_MIN_HEIGHT_DESKTOP } }} spacing={1}>
-                    <CircularProgress size={26} />
-                    <Typography variant="body2" color="text.secondary">加载作品中...</Typography>
-                  </Stack>
-                ) : previewError ? (
-                  <Box sx={{ p: 2.2 }}>
-                    <Alert severity="warning">{previewError}</Alert>
-                  </Box>
-                ) : previewUrl ? (
+                  {detailLoading ? (
+                    <Stack alignItems="center" justifyContent="center" sx={{ minHeight: { xs: 420, md: PREVIEW_MIN_HEIGHT_DESKTOP } }} spacing={1}>
+                      <CircularProgress size={26} />
+                      <Typography variant="body2" color="text.secondary">加载作品中...</Typography>
+                    </Stack>
+                  ) : selectedWorkDescriptionNode ? (
+                    <Box
+                      sx={{
+                        width: '100%',
+                        minHeight: { xs: 420, md: PREVIEW_MIN_HEIGHT_DESKTOP },
+                        maxHeight: { xs: 'none', md: PREVIEW_MIN_HEIGHT_DESKTOP },
+                        overflow: 'auto',
+                        background: 'linear-gradient(180deg, #f7f3ff 0%, #fdfbff 100%)',
+                        p: { xs: 1.6, md: 3.2 },
+                      }}
+                    >
+                      <Paper
+                        elevation={0}
+                        sx={{
+                          maxWidth: 860,
+                          mx: 'auto',
+                          minHeight: { xs: 360, md: 'calc(100% - 8px)' },
+                          p: { xs: 2.2, md: 4 },
+                          borderRadius: 2,
+                          border: '1px solid #e1d4f7',
+                          background: '#fff',
+                          boxShadow: '0 12px 30px rgba(90, 50, 145, 0.10)',
+                        }}
+                      >
+                        <Typography variant="overline" sx={{ color: '#7b4dc2', fontWeight: 900, letterSpacing: 1.2 }}>
+                          作品简介
+                        </Typography>
+                        <Typography variant="h6" sx={{ mt: 0.2, color: '#3f2467', fontWeight: 800 }}>
+                          {selectedRow?.title || '未命名作品'}
+                        </Typography>
+                        <Divider sx={{ my: 2.2, borderColor: '#eadffc' }} />
+                        {selectedWorkDescription ? (
+                          <Typography
+                            sx={{
+                              color: '#2f263d',
+                              fontSize: { xs: 16, md: 18 },
+                              lineHeight: 1.95,
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-word',
+                            }}
+                          >
+                            {selectedWorkDescription}
+                          </Typography>
+                        ) : (
+                          <Alert severity="info">该作品未填写作品简介。</Alert>
+                        )}
+                      </Paper>
+                    </Box>
+                  ) : previewError ? (
+                    <Box sx={{ p: 2.2 }}>
+                      <Alert severity="warning">{previewError}</Alert>
+                    </Box>
+                  ) : previewUrl ? (
                   <Box
                     sx={{
                       width: '100%',
@@ -1883,7 +2138,7 @@ export default function JudgeReviewPage({
                   }}
                 >
                   <Typography variant="subtitle2" sx={{ color: '#4e2f7f', fontWeight: 700 }}>
-                    {scoringMode === 'history_paper_quantitative' ? '量化评分表' : '评分与评语'}
+                    {scoringMode === 'history_paper_quantitative' ? '维度评分表' : '评分与评语'}
                   </Typography>
                 </Box>
 
@@ -1980,36 +2235,8 @@ export default function JudgeReviewPage({
                         )}
                         {quantitativeScoreInputsLockedByFatal && (
                           <Alert severity="info">
-                            已命中致命否决项，分项评分输入已锁定；取消勾选后可继续填写分项分数。
+                            已命中致命否决项，维度评分输入已锁定；取消勾选后可继续填写维度分数。
                           </Alert>
-                        )}
-
-                        {!!rubricCapCriteria.length && (
-                          <Paper variant="outlined" sx={{ p: 1.2, borderColor: '#f5dfba', background: '#fffaf3' }}>
-                            <Typography variant="body2" sx={{ fontWeight: 700, color: '#8c5b12', mb: 0.6 }}>
-                              总评上限项（系统按评分自动判定；总评超过 74 分时从 74 开始减，不超过 74 分时从当前总分开始减；每项 -5 分，最终上限 C）
-                            </Typography>
-                            <Stack spacing={0.3}>
-                              {rubricCapCriteria.map((item) => {
-                                const code = String(item?.code || '').trim();
-                                const hit = quantitativeCapHits.includes(code);
-                                const triggerCondition = buildCapTriggerConditionLabel(code);
-                                return (
-                                  <Stack key={code} direction="row" spacing={0.6} alignItems="center">
-                                    <Chip
-                                      size="small"
-                                      label={hit ? '已触发' : '未触发'}
-                                      color={hit ? 'warning' : 'default'}
-                                      variant={hit ? 'filled' : 'outlined'}
-                                    />
-                                    <Typography variant="body2" color="text.secondary">
-                                      {`${item?.name || code}${triggerCondition ? `（触发条件：${triggerCondition}）` : ''}${item?.description ? `：${item.description}` : ''}`}
-                                    </Typography>
-                                  </Stack>
-                                );
-                              })}
-                            </Stack>
-                          </Paper>
                         )}
 
                         {!!missingExpectedDimensionCodes.length && (
@@ -2021,6 +2248,46 @@ export default function JudgeReviewPage({
                         <Stack spacing={1.2}>
                           {rubricDimensions.map((dimension) => {
                             const items = Array.isArray(dimension?.items) ? dimension.items : [];
+                            const dimensionCode = String(dimension?.code || '').trim().toUpperCase();
+                            const dimensionName = String(dimension?.name || '').trim();
+                            const dimensionWeight = Number(dimension?.weight || 0);
+                            if (!items.length) {
+                              return (
+                                <Paper key={dimensionCode || dimension?.name} variant="outlined" sx={{ p: 1.2, borderColor: '#e4d7f6' }}>
+                                  <Typography variant="body2" sx={{ fontWeight: 700, color: '#4e2f7f', mb: 0.8 }}>
+                                    {`${dimensionCode || ''} ${dimensionName || ''}（满分 ${dimensionWeight ?? '-'}）`}
+                                  </Typography>
+                                  <TextField
+                                    size="small"
+                                    type="text"
+                                    label={`${dimensionCode || ''} ${dimensionName || ''}（0-${formatRangeNumber(dimensionWeight) || 0}）`}
+                                    placeholder={`0-${formatRangeNumber(dimensionWeight) || 0}`}
+                                    InputLabelProps={{ shrink: true }}
+                                    value={String(quantitativeItemScores[dimensionCode] ?? '')}
+                                    onChange={(event) => {
+                                      const sanitized = sanitizeScoreInput(event.target.value, dimensionWeight);
+                                      setQuantitativeItemScores((prev) => ({ ...prev, [dimensionCode]: sanitized }));
+                                      if (
+                                        reviewFieldError?.fieldType === 'quantitative'
+                                        && reviewFieldError.code === dimensionCode
+                                        && String(sanitized || '').trim()
+                                      ) {
+                                        setReviewFieldError(null);
+                                      }
+                                    }}
+                                    inputRef={(node) => {
+                                      if (!dimensionCode) return;
+                                      quantitativeInputRefs.current[dimensionCode] = node;
+                                    }}
+                                    inputProps={{ inputMode: 'decimal', autoComplete: 'off' }}
+                                    disabled={!canEditReviewFields || quantitativeScoreInputsLockedByFatal}
+                                    fullWidth
+                                    error={reviewFieldError?.fieldType === 'quantitative' && reviewFieldError.code === dimensionCode}
+                                    helperText={reviewFieldError?.fieldType === 'quantitative' && reviewFieldError.code === dimensionCode ? reviewFieldError.message : ''}
+                                  />
+                                </Paper>
+                              );
+                            }
                             return (
                               <Paper key={dimension?.code || dimension?.name} variant="outlined" sx={{ p: 1.2, borderColor: '#e4d7f6' }}>
                                 <Typography variant="body2" sx={{ fontWeight: 700, color: '#4e2f7f', mb: 0.8 }}>

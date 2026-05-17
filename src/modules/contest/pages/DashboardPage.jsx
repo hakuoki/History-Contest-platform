@@ -13,6 +13,7 @@ import {
   DialogTitle,
   Divider,
   FormControl,
+  FormControlLabel,
   FormHelperText,
   Grid2,
   IconButton,
@@ -43,6 +44,7 @@ import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded';
 import dayjs from 'dayjs';
+import AIReviewSettingsDialog from '../components/AIReviewSettingsDialog';
 import {
   addCompetitionJudge,
   createCompetition,
@@ -192,6 +194,12 @@ const SCORING_MODE_OPTIONS = [
   { value: 'history_paper_quantitative', label: '历史论文量化评分（7维度）' },
 ];
 const DEFAULT_RUBRIC_KEY = 'history_paper_quantitative';
+const ATTACHMENT_FORMAT_LABELS = {
+  pdf: 'PDF',
+  docx: 'DOCX',
+  xlsx: 'XLSX',
+};
+const DEFAULT_SCORING_REVIEW_FORMATS = ['pdf'];
 const USER_SYNC_CONFLICT_HINT =
   '“冲突”表示系统在同步到 users 时，发现邮箱/手机号无法唯一对应同一账号（如分别命中不同用户），为避免错绑账号而拒绝自动同步。';
 const CONTEST_THEME = {
@@ -446,6 +454,30 @@ function canonicalFormatToken(value) {
   if (token === 'doc' || token === 'docx' || token === 'word') return 'docx';
   if (token === 'xls' || token === 'xlsx' || token === 'excel') return 'xlsx';
   return token;
+}
+
+function formatAttachmentFormatLabel(value) {
+  const token = canonicalFormatToken(value);
+  if (!token) return '-';
+  return ATTACHMENT_FORMAT_LABELS[token] || token.toUpperCase();
+}
+
+function formatWeightInputValue(value, fallback = 0) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(fallback);
+  const rounded = Math.round(numeric * 100) / 100;
+  if (Number.isInteger(rounded)) return String(rounded);
+  return String(rounded);
+}
+
+function toBoolFlag(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const text = String(value ?? '').trim().toLowerCase();
+  if (!text) return Boolean(fallback);
+  if (['1', 'true', 'yes', 'on'].includes(text)) return true;
+  if (['0', 'false', 'no', 'off'].includes(text)) return false;
+  return Boolean(fallback);
 }
 
 function normalizeAttachmentMeta(raw) {
@@ -1638,7 +1670,14 @@ function Dashboard({
   const [scoringMode, setScoringMode] = useState('single_score');
   const [scoringRubricVersions, setScoringRubricVersions] = useState([]);
   const [scoringRubricVersionKey, setScoringRubricVersionKey] = useState('');
+  const [scoringReviewAttachmentFormats, setScoringReviewAttachmentFormats] = useState([...DEFAULT_SCORING_REVIEW_FORMATS]);
+  const [scoringManualWeight, setScoringManualWeight] = useState('100');
+  const [scoringAIWeight, setScoringAIWeight] = useState('0');
+  const [scoringAIReviewEnabled, setScoringAIReviewEnabled] = useState(false);
   const [scoringCanEdit, setScoringCanEdit] = useState(true);
+  const [scoringEditing, setScoringEditing] = useState(false);
+  const [aiReviewOpen, setAiReviewOpen] = useState(false);
+  const [aiReviewTarget, setAiReviewTarget] = useState(null);
   const [myInfoOpen, setMyInfoOpen] = useState(false);
   const [myInfoCompetition, setMyInfoCompetition] = useState(null);
   const latestRequestIdsRef = useRef({
@@ -1714,6 +1753,20 @@ function Dashboard({
     () => normalizeAllowedFormats(submissionFormatConfig.optional_formats, []).filter((fmt) => !submissionRequiredFormats.includes(fmt)),
     [submissionFormatConfig.optional_formats, submissionRequiredFormats]
   );
+  const scoringFormatConfig = useMemo(
+    () => resolveCompetitionFormatConfig(scoringTarget || {}),
+    [
+      scoringTarget?.submission_rule_mode,
+      scoringTarget?.required_formats,
+      scoringTarget?.optional_formats,
+      scoringTarget?.allowed_formats,
+      scoringTarget?.attachment_mode,
+    ]
+  );
+  const scoringFormatOptions = useMemo(() => {
+    const competitionFormats = normalizeAllowedFormats(scoringFormatConfig.allowed_formats, []);
+    return competitionFormats.length ? competitionFormats : [...DEFAULT_SCORING_REVIEW_FORMATS];
+  }, [scoringFormatConfig.allowed_formats]);
   const submissionUseFormatSlots = submissionRuleMode === 'required_optional' || submissionAttachmentMode === 'multiple';
   const submissionPrimaryFormat = useMemo(() => {
     if (!submissionUseFormatSlots) return '';
@@ -4044,7 +4097,7 @@ function Dashboard({
     }
   };
 
-  const loadScoringSettings = async (competitionId) => {
+  const loadScoringSettings = async (competitionId, competitionRow = null) => {
     const safeCompetitionId = Number(competitionId);
     if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
     const requestId = createRequestId();
@@ -4061,11 +4114,26 @@ function Dashboard({
       const nextMode = String(settings?.settings?.mode_key || 'single_score').trim() || 'single_score';
       const nextRubricKey = String(settings?.settings?.rubric_key || DEFAULT_RUBRIC_KEY).trim() || DEFAULT_RUBRIC_KEY;
       const nextVersionKey = String(settings?.settings?.rubric_version_key || '').trim();
+      const runtimeFormatConfig = resolveCompetitionFormatConfig(competitionRow || scoringTarget || {});
+      const competitionFormats = normalizeAllowedFormats(runtimeFormatConfig.allowed_formats, []);
+      const formatOptions = competitionFormats.length ? competitionFormats : [...DEFAULT_SCORING_REVIEW_FORMATS];
+      const normalizedSavedFormats = normalizeAllowedFormats(
+        settings?.settings?.review_attachment_formats,
+        formatOptions
+      );
+      const nextReviewFormats = normalizedSavedFormats.filter((fmt) => formatOptions.includes(fmt));
+      const fallbackReviewFormat = formatOptions.includes('pdf') ? 'pdf' : (formatOptions[0] || 'pdf');
+      const nextAIReviewEnabled = toBoolFlag(settings?.settings?.ai_review_enabled, false);
 
       setScoringSettings(settings);
       setScoringMode(nextMode);
       setScoringCanEdit(Boolean(settings?.can_edit));
       setScoringRubricVersionKey(nextVersionKey);
+      setScoringReviewAttachmentFormats(nextReviewFormats.length ? nextReviewFormats : [fallbackReviewFormat]);
+      setScoringAIReviewEnabled(nextAIReviewEnabled);
+      setScoringManualWeight(formatWeightInputValue(nextAIReviewEnabled ? settings?.settings?.manual_score_weight : 100, 100));
+      setScoringAIWeight(formatWeightInputValue(nextAIReviewEnabled ? settings?.settings?.ai_score_weight : 0, 0));
+      setScoringEditing(false);
 
       const { items } = await listScoringRubricVersions(nextRubricKey, { requestId: createRequestId() });
       const rows = Array.isArray(items) ? items : [];
@@ -4082,7 +4150,17 @@ function Dashboard({
       setScoringSettings(null);
       setScoringRubricVersions([]);
       setScoringRubricVersionKey('');
+      const runtimeFormatConfig = resolveCompetitionFormatConfig(competitionRow || scoringTarget || {});
+      const competitionFormats = normalizeAllowedFormats(runtimeFormatConfig.allowed_formats, []);
+      const fallbackReviewFormat = competitionFormats.includes('pdf')
+        ? 'pdf'
+        : (competitionFormats[0] || DEFAULT_SCORING_REVIEW_FORMATS[0]);
+      setScoringReviewAttachmentFormats([fallbackReviewFormat]);
+      setScoringManualWeight('100');
+      setScoringAIWeight('0');
+      setScoringAIReviewEnabled(false);
       setScoringCanEdit(true);
+      setScoringEditing(false);
       setMessage({ type: 'error', text: getErrorText(error, '加载评分设置失败') });
     } finally {
       if (latestRequestIdsRef.current.scoring === requestId) setScoringLoading(false);
@@ -4098,8 +4176,25 @@ function Dashboard({
     setScoringMode('single_score');
     setScoringRubricVersions([]);
     setScoringRubricVersionKey('');
+    const runtimeFormatConfig = resolveCompetitionFormatConfig(row || {});
+    const competitionFormats = normalizeAllowedFormats(runtimeFormatConfig.allowed_formats, []);
+    const fallbackReviewFormat = competitionFormats.includes('pdf')
+      ? 'pdf'
+      : (competitionFormats[0] || DEFAULT_SCORING_REVIEW_FORMATS[0]);
+    setScoringReviewAttachmentFormats([fallbackReviewFormat]);
+    setScoringManualWeight('100');
+    setScoringAIWeight('0');
+    setScoringAIReviewEnabled(false);
     setScoringCanEdit(true);
-    await loadScoringSettings(safeCompetitionId);
+    setScoringEditing(false);
+    await loadScoringSettings(safeCompetitionId, row);
+  };
+
+  const openAIReviewDialog = (row) => {
+    const safeCompetitionId = Number(row?.id);
+    if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
+    setAiReviewTarget(row);
+    setAiReviewOpen(true);
   };
 
   const submitScoringSettings = async () => {
@@ -4107,7 +4202,40 @@ function Dashboard({
     if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
 
     const normalizedMode = String(scoringMode || '').trim() || 'single_score';
-    const payload = { mode_key: normalizedMode };
+    const availableFormats = Array.isArray(scoringFormatOptions) && scoringFormatOptions.length
+      ? scoringFormatOptions
+      : [...DEFAULT_SCORING_REVIEW_FORMATS];
+    const normalizedReviewFormats = normalizeAllowedFormats(scoringReviewAttachmentFormats, availableFormats)
+      .filter((fmt) => availableFormats.includes(fmt));
+    if (!normalizedReviewFormats.length) {
+      setMessage({ type: 'warning', text: '请至少选择一种评审展示附件格式' });
+      return;
+    }
+
+    const manualWeightNumber = scoringAIReviewEnabled ? Number(scoringManualWeight) : 100;
+    const aiWeightNumber = scoringAIReviewEnabled ? Number(scoringAIWeight) : 0;
+    if (!Number.isFinite(manualWeightNumber) || !Number.isFinite(aiWeightNumber)) {
+      setMessage({ type: 'warning', text: '请填写有效的人工/AI权重（数字）' });
+      return;
+    }
+    const roundedManualWeight = Math.round(manualWeightNumber * 100) / 100;
+    const roundedAIWeight = Math.round(aiWeightNumber * 100) / 100;
+    if (roundedManualWeight < 0 || roundedManualWeight > 100 || roundedAIWeight < 0 || roundedAIWeight > 100) {
+      setMessage({ type: 'warning', text: '人工/AI权重必须在 0-100 之间' });
+      return;
+    }
+    if (Math.abs((roundedManualWeight + roundedAIWeight) - 100) > 0.0001) {
+      setMessage({ type: 'warning', text: '人工评审权重与 AI 评审权重之和必须等于 100' });
+      return;
+    }
+
+    const payload = {
+      mode_key: normalizedMode,
+      review_attachment_formats: normalizedReviewFormats,
+      manual_score_weight: roundedManualWeight,
+      ai_score_weight: roundedAIWeight,
+      ai_review_enabled: scoringAIReviewEnabled,
+    };
     if (normalizedMode === 'history_paper_quantitative') {
       const versionKey = String(scoringRubricVersionKey || '').trim();
       if (!versionKey) {
@@ -4123,6 +4251,14 @@ function Dashboard({
       const { data } = await updateCompetitionScoringSettings(safeCompetitionId, payload, { requestId: createRequestId() });
       setScoringSettings(data || null);
       setScoringCanEdit(Boolean(data?.can_edit));
+      const savedFormats = normalizeAllowedFormats(data?.settings?.review_attachment_formats, normalizedReviewFormats)
+        .filter((fmt) => availableFormats.includes(fmt));
+      setScoringReviewAttachmentFormats(savedFormats.length ? savedFormats : normalizedReviewFormats);
+      const savedAIReviewEnabled = toBoolFlag(data?.settings?.ai_review_enabled, scoringAIReviewEnabled);
+      setScoringAIReviewEnabled(savedAIReviewEnabled);
+      setScoringManualWeight(formatWeightInputValue(savedAIReviewEnabled ? data?.settings?.manual_score_weight : 100, roundedManualWeight));
+      setScoringAIWeight(formatWeightInputValue(savedAIReviewEnabled ? data?.settings?.ai_score_weight : 0, roundedAIWeight));
+      setScoringEditing(false);
       setMessage({ type: 'success', text: '评分设置已保存' });
     } catch (error) {
       setMessage({ type: 'error', text: getErrorText(error, '保存评分设置失败') });
@@ -4142,6 +4278,17 @@ function Dashboard({
       );
       setScoringSettings(data || null);
       setScoringCanEdit(Boolean(data?.can_edit));
+      const availableFormats = Array.isArray(scoringFormatOptions) && scoringFormatOptions.length
+        ? scoringFormatOptions
+        : [...DEFAULT_SCORING_REVIEW_FORMATS];
+      const unlockedFormats = normalizeAllowedFormats(data?.settings?.review_attachment_formats, availableFormats)
+        .filter((fmt) => availableFormats.includes(fmt));
+      if (unlockedFormats.length) setScoringReviewAttachmentFormats(unlockedFormats);
+      const unlockedAIReviewEnabled = toBoolFlag(data?.settings?.ai_review_enabled, false);
+      setScoringAIReviewEnabled(unlockedAIReviewEnabled);
+      setScoringManualWeight(formatWeightInputValue(unlockedAIReviewEnabled ? data?.settings?.manual_score_weight : 100, 100));
+      setScoringAIWeight(formatWeightInputValue(unlockedAIReviewEnabled ? data?.settings?.ai_score_weight : 0, 0));
+      setScoringEditing(false);
       setMessage({ type: 'success', text: '评分设置已手动解锁，请尽快完成调整' });
     } catch (error) {
       setMessage({ type: 'error', text: getErrorText(error, '解锁评分设置失败') });
@@ -4572,6 +4719,16 @@ function Dashboard({
                         }}
                       >
                         评分设置
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openAIReviewDialog(row);
+                        }}
+                      >
+                        AI评审配置
                       </Button>
                       <Button
                         variant="outlined"
@@ -5535,6 +5692,14 @@ function Dashboard({
                 评分设置
               </Button>
             )}
+            {detailData && (detailFromMine || canCreateCompetition) && (
+              <Button
+                variant="outlined"
+                onClick={() => openAIReviewDialog(detailData)}
+              >
+                AI评审配置
+              </Button>
+            )}
             {detailFromMine && detailData && (
               <Button
                 variant="outlined"
@@ -6371,7 +6536,7 @@ function Dashboard({
           setScoringTarget(null);
         }}
         fullWidth
-        maxWidth="sm"
+        maxWidth="lg"
       >
         <DialogTitle>
           评分设置（比赛：{scoringTarget?.name || scoringTarget?.id || '-'}）
@@ -6392,6 +6557,11 @@ function Dashboard({
                   当前评分设置已锁定（评审已开始或已产生评分），仅支持查看。
                 </Alert>
               )}
+              {scoringCanEdit && !scoringEditing && (
+                <Alert severity="info">
+                  当前为已保存设置。点击“修改设置”后才可编辑，修改完成后请再次保存。
+                </Alert>
+              )}
               {!scoringCanEdit && (
                 <Button
                   size="small"
@@ -6407,7 +6577,7 @@ function Dashboard({
                 <Select
                   label="评分模式"
                   value={scoringMode}
-                  disabled={!scoringCanEdit || scoringSaving || scoringUnlocking}
+                  disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking}
                   onChange={(event) => {
                     const nextMode = String(event.target.value || '').trim() || 'single_score';
                     setScoringMode(nextMode);
@@ -6430,7 +6600,7 @@ function Dashboard({
                   <Select
                     label="评分规则版本"
                     value={scoringRubricVersionKey}
-                    disabled={!scoringCanEdit || scoringSaving || scoringUnlocking || !scoringRubricVersions.length}
+                    disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking || !scoringRubricVersions.length}
                     onChange={(event) => setScoringRubricVersionKey(String(event.target.value || '').trim())}
                   >
                     {scoringRubricVersions.map((item) => (
@@ -6445,12 +6615,112 @@ function Dashboard({
                 </FormControl>
               )}
 
+              <FormControl fullWidth size="small">
+                <InputLabel>评审展示附件格式</InputLabel>
+                <Select
+                  multiple
+                  label="评审展示附件格式"
+                  value={scoringReviewAttachmentFormats}
+                  disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking}
+                  renderValue={(selected) => {
+                    const values = Array.isArray(selected) ? selected : [];
+                    if (!values.length) return '-';
+                    return values.map((fmt) => formatAttachmentFormatLabel(fmt)).join('、');
+                  }}
+                  onChange={(event) => {
+                    const selectedValues = Array.isArray(event.target.value)
+                      ? event.target.value
+                      : [event.target.value];
+                    const normalized = normalizeAllowedFormats(selectedValues, [])
+                      .filter((fmt) => scoringFormatOptions.includes(fmt));
+                    const fallbackFormat = scoringFormatOptions.includes('pdf')
+                      ? 'pdf'
+                      : (scoringFormatOptions[0] || DEFAULT_SCORING_REVIEW_FORMATS[0]);
+                    setScoringReviewAttachmentFormats(normalized.length ? normalized : [fallbackFormat]);
+                  }}
+                >
+                  {scoringFormatOptions.map((fmt) => (
+                    <MenuItem key={`scoring_attachment_format_${fmt}`} value={fmt}>
+                      <Checkbox checked={scoringReviewAttachmentFormats.includes(fmt)} />
+                      <Typography variant="body2">{formatAttachmentFormatLabel(fmt)}</Typography>
+                    </MenuItem>
+                  ))}
+                </Select>
+                <FormHelperText>
+                  仅展示所选格式给评委，减少重复附件与低价值文档转换。DOCX/XLSX 涉及底层转换，评审展示可能有延迟，推荐优先选择 PDF。
+                </FormHelperText>
+              </FormControl>
+
+              <FormControlLabel
+                control={(
+                  <Checkbox
+                    checked={scoringAIReviewEnabled}
+                    disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking}
+                    onChange={(event) => {
+                      const checked = event.target.checked;
+                      setScoringAIReviewEnabled(checked);
+                      if (!checked) {
+                        setScoringManualWeight('100');
+                        setScoringAIWeight('0');
+                      }
+                    }}
+                  />
+                )}
+                label="启用 AI 评审"
+              />
+
+              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  label="人工评审权重（%）"
+                  type="number"
+                  value={scoringManualWeight}
+                  disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking || !scoringAIReviewEnabled}
+                  onChange={(event) => setScoringManualWeight(String(event.target.value || '').trim())}
+                  inputProps={{ min: 0, max: 100, step: 0.01 }}
+                />
+                <TextField
+                  fullWidth
+                  size="small"
+                  label="AI 评审权重（%）"
+                  type="number"
+                  value={scoringAIWeight}
+                  disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking || !scoringAIReviewEnabled}
+                  onChange={(event) => setScoringAIWeight(String(event.target.value || '').trim())}
+                  inputProps={{ min: 0, max: 100, step: 0.01 }}
+                />
+              </Stack>
+              <Typography variant="caption" color="text.secondary" sx={{ px: 0.5 }}>
+                {scoringAIReviewEnabled
+                  ? '人工评审权重 + AI 评审权重 = 100%，用于计算选手最终得分。'
+                  : 'AI 评审停用时，最终得分仅使用人工评审。'}
+              </Typography>
+
               <Stack spacing={0.3} sx={{ px: 0.5 }}>
                 <Typography variant="body2" color="text.secondary">
                   当前状态：{String(scoringSettings?.settings?.status || '-')}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   当前模式：{String(scoringSettings?.settings?.mode_key || '-')}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  当前 AI 评审：{toBoolFlag(scoringSettings?.settings?.ai_review_enabled, scoringAIReviewEnabled) ? '已启用' : '已停用'}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  当前评审附件格式：{
+                    (() => {
+                      const labels = normalizeAllowedFormats(
+                        scoringSettings?.settings?.review_attachment_formats,
+                        scoringReviewAttachmentFormats
+                      ).map((fmt) => formatAttachmentFormatLabel(fmt));
+                      return labels.length ? labels.join('、') : '-';
+                    })()
+                  }
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  当前权重：人工 {formatWeightInputValue(scoringAIReviewEnabled ? scoringSettings?.settings?.manual_score_weight : 100, scoringManualWeight)}%
+                  ，AI {formatWeightInputValue(scoringAIReviewEnabled ? scoringSettings?.settings?.ai_score_weight : 0, scoringAIWeight)}%
                 </Typography>
                 {String(scoringSettings?.settings?.rubric_version_key || '').trim() && (
                   <Typography variant="body2" color="text.secondary">
@@ -6474,12 +6744,29 @@ function Dashboard({
           <Button
             variant="contained"
             disabled={scoringSaving || scoringLoading || scoringUnlocking || !scoringCanEdit}
-            onClick={submitScoringSettings}
+            onClick={() => {
+              if (!scoringCanEdit) return;
+              if (!scoringEditing) {
+                setScoringEditing(true);
+                return;
+              }
+              submitScoringSettings();
+            }}
           >
-            {scoringSaving ? '保存中...' : '保存评分设置'}
+            {scoringEditing ? (scoringSaving ? '保存中...' : '保存评分设置') : '修改设置'}
           </Button>
         </DialogActions>
       </Dialog>
+
+      <AIReviewSettingsDialog
+        open={aiReviewOpen}
+        competition={aiReviewTarget}
+        onClose={() => {
+          setAiReviewOpen(false);
+          setAiReviewTarget(null);
+        }}
+        setMessage={setMessage}
+      />
 
       <Dialog
         open={myInfoOpen}

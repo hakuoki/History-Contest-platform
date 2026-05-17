@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import React from 'react';
 
 import {
+  default as JudgeReviewPage,
   buildEmptyQuantitativeItemScoreMap,
   buildQuantitativeSnapshot,
   buildXlsxPreviewSrcDoc,
@@ -11,25 +14,49 @@ import {
   findFirstMissingReviewField,
   isPdfContent,
   resolveAttachmentPreviewExt,
+  resolveJudgeReviewAttachmentRequestPlan,
 } from '../JudgeReviewPage.jsx';
+
+const createRequestIdMock = vi.fn(() => 'req_test');
+const getAssignedSubmissionAttachmentBlobMock = vi.fn(async () => null);
+const getAssignedSubmissionReviewContextMock = vi.fn(async () => ({ data: null, requestId: 'req_test' }));
+const getCompetitionByIdMock = vi.fn(async () => ({
+  data: {
+    id: 1,
+    name: '第4届历史论文评审赛',
+    review_start: '2026-05-11T00:00:00',
+    review_end: '2026-05-12T00:00:00',
+    submission_end: '2026-05-10T00:00:00',
+  },
+  requestId: 'req_test',
+}));
+const listMyAssignedSubmissionsPagedMock = vi.fn(async () => ({
+  items: [],
+  total: 0,
+  offset: 0,
+  requestId: 'req_test',
+}));
+const submitAssignedSubmissionReviewMock = vi.fn(async () => ({ data: null, requestId: 'req_test' }));
+
+vi.mock('../../../../api', () => ({
+  createRequestId: (...args) => createRequestIdMock(...args),
+  getAssignedSubmissionAttachmentBlob: (...args) => getAssignedSubmissionAttachmentBlobMock(...args),
+  getAssignedSubmissionReviewContext: (...args) => getAssignedSubmissionReviewContextMock(...args),
+  getCompetitionById: (...args) => getCompetitionByIdMock(...args),
+  listMyAssignedSubmissionsPaged: (...args) => listMyAssignedSubmissionsPagedMock(...args),
+  submitAssignedSubmissionReview: (...args) => submitAssignedSubmissionReviewMock(...args),
+}));
 
 const rubricDimensions = [
   {
     code: 'A',
     name: '问题意识',
     weight: 20,
-    items: [
-      {
-        code: 'A1',
-        name: '问题明确性',
-        max_score: 7,
-      },
-      {
-        code: 'A2',
-        name: '问题可回答性',
-        max_score: 7,
-      },
-    ],
+  },
+  {
+    code: 'B',
+    name: '文献对话',
+    weight: 15,
   },
 ];
 
@@ -48,7 +75,7 @@ describe('buildQuantitativeSnapshot', () => {
     const snapshot = buildQuantitativeSnapshot(
       rubricDimensions,
       rubricConfig,
-      { A1: '' },
+      { A: '', B: '' },
       [],
     );
 
@@ -57,17 +84,97 @@ describe('buildQuantitativeSnapshot', () => {
     expect(snapshot.capTriggered).toBe(false);
   });
 
-  it('marks cap hits only after the relevant score is filled', () => {
+  it('sums dimension scores directly without cap hits', () => {
     const snapshot = buildQuantitativeSnapshot(
       rubricDimensions,
       rubricConfig,
-      { A1: '1' },
+      { A: '18', B: '12' },
       [],
     );
 
     expect(snapshot.hasAnyInput).toBe(true);
-    expect(snapshot.capHits).toEqual(['cap_no_question']);
-    expect(snapshot.capTriggered).toBe(true);
+    expect(snapshot.rawTotalScore).toBe(30);
+    expect(snapshot.finalScore).toBe(30);
+    expect(snapshot.capHits).toEqual([]);
+    expect(snapshot.capTriggered).toBe(false);
+  });
+});
+
+describe('judge review header', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('shows the competition name above the review workspace', async () => {
+    render(<JudgeReviewPage competitionId={1} setMessage={vi.fn()} />);
+
+    expect(await screen.findByText('比赛：第4届历史论文评审赛')).toBeTruthy();
+  });
+
+  it('shows a submitted work description in the review workspace', async () => {
+    listMyAssignedSubmissionsPagedMock.mockResolvedValueOnce({
+      items: [
+        {
+          assignment_id: 12,
+          submission_id: 101,
+          review_code: 'R-101',
+          title: '城墙记忆与地方社会',
+          work_description: '本作品聚焦城墙空间如何改变地方社会记忆，并说明材料来源与研究路径。',
+          attachment_name: 'paper.pdf',
+          attachment_ext: 'pdf',
+          submit_version: 1,
+          last_submitted_at: '2026-05-10T08:30:00',
+          reviewed: false,
+          my_score: null,
+        },
+      ],
+      total: 1,
+      offset: 0,
+      requestId: 'req_test',
+    });
+    getAssignedSubmissionReviewContextMock.mockResolvedValueOnce({
+      data: {
+        competition_id: 1,
+        competition_name: '第4届历史论文评审赛',
+        submission_id: 101,
+        submission_title: '城墙记忆与地方社会',
+        submission_work_description: '本作品聚焦城墙空间如何改变地方社会记忆，并说明材料来源与研究路径。',
+        review_code: 'R-101',
+        judge_user_id: 1,
+        judge_status: 'active',
+        assignment_id: 12,
+        competition_scoring_settings: {
+          settings: { mode_key: 'single_score' },
+          rubric_version: null,
+          rubric_config: null,
+          locked: false,
+          can_edit: true,
+        },
+        review: null,
+        attachments: [
+          {
+            attachment_key: 'main-pdf',
+            attachment_name: 'paper.pdf',
+            attachment_ext: 'pdf',
+            is_primary: true,
+          },
+        ],
+        can_edit: true,
+        review_window: { can_score: true, message: '' },
+      },
+      requestId: 'req_test',
+    });
+
+    render(<JudgeReviewPage competitionId={1} setMessage={vi.fn()} />);
+
+    fireEvent.click(await screen.findByText('作品简介'));
+
+    expect(await screen.findByText('当前内容：作品简介')).toBeTruthy();
+    expect(await screen.findByText(/本作品聚焦城墙空间如何改变地方社会记忆/)).toBeTruthy();
   });
 });
 
@@ -76,13 +183,13 @@ describe('findFirstMissingReviewField', () => {
     const validation = findFirstMissingReviewField({
       scoringMode: 'history_paper_quantitative',
       rubricDimensions,
-      quantitativeItemScores: { A1: '1', A2: '' },
+      quantitativeItemScores: { A: '1', B: '' },
     });
 
     expect(validation.ok).toBe(false);
     expect(validation.fieldType).toBe('quantitative');
-    expect(validation.code).toBe('A2');
-    expect(validation.message).toContain('A2');
+    expect(validation.code).toBe('B');
+    expect(validation.message).toContain('B');
   });
 
   it('rejects an empty single score before submit', () => {
@@ -101,7 +208,7 @@ describe('findFirstMissingReviewField', () => {
     const validation = findFirstMissingReviewField({
       scoringMode: 'history_paper_quantitative',
       rubricDimensions,
-      quantitativeItemScores: { A1: '', A2: '' },
+      quantitativeItemScores: { A: '', B: '' },
       fatalHits: ['fatal_plagiarism'],
     });
 
@@ -112,8 +219,8 @@ describe('findFirstMissingReviewField', () => {
 describe('buildEmptyQuantitativeItemScoreMap', () => {
   it('resets every quantitative item score to empty string', () => {
     expect(buildEmptyQuantitativeItemScoreMap(rubricDimensions)).toEqual({
-      A1: '',
-      A2: '',
+      A: '',
+      B: '',
     });
   });
 });
@@ -158,7 +265,32 @@ describe('pdf preview detection', () => {
   it('prefers backend preview format and falls back docx to pdf', () => {
     expect(resolveAttachmentPreviewExt({ activeExt: 'docx' })).toBe('pdf');
     expect(resolveAttachmentPreviewExt({ activeExt: 'docx', previewFormat: 'pdf' })).toBe('pdf');
+    expect(resolveAttachmentPreviewExt({ activeExt: 'word' })).toBe('pdf');
     expect(resolveAttachmentPreviewExt({ activeExt: 'xlsx' })).toBe('xlsx');
+  });
+});
+
+describe('judge review attachment fetch plan', () => {
+  it('downloads the original docx while previewing the converted pdf', () => {
+    expect(resolveJudgeReviewAttachmentRequestPlan('word')).toEqual({
+      activeExt: 'docx',
+      previewAttachmentExt: 'pdf',
+      downloadAttachmentExt: 'docx',
+      previewDisposition: 'inline',
+      downloadDisposition: 'attachment',
+      needsSeparatePreviewRequest: true,
+    });
+  });
+
+  it('downloads the original xlsx and previews the workbook directly', () => {
+    expect(resolveJudgeReviewAttachmentRequestPlan('xlsx')).toEqual({
+      activeExt: 'xlsx',
+      previewAttachmentExt: 'xlsx',
+      downloadAttachmentExt: 'xlsx',
+      previewDisposition: 'attachment',
+      downloadDisposition: 'attachment',
+      needsSeparatePreviewRequest: false,
+    });
   });
 });
 

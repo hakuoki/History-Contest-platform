@@ -689,6 +689,120 @@ export async function deleteCompetitionJudge(competitionId, judgeUserId, options
   };
 }
 
+export async function getCompetitionAIReviewSettings(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(`${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/settings`, {
+    headers: requestIdHeaders(requestId),
+  });
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function updateCompetitionAIReviewSettings(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.put(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/settings`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function previewCompetitionAIReview(competitionId, payload, options = {}) {
+  const { requestId, timeoutMs } = options;
+  const formData = new FormData();
+  formData.append('rubric_key', String(payload?.rubric_key || '').trim());
+  formData.append('model_key', String(payload?.model_key || '').trim());
+  const canUseFileClass = typeof File !== 'undefined';
+  const canUseBlobClass = typeof Blob !== 'undefined';
+  const isUploadObject = (item) => (
+    (canUseFileClass && item instanceof File)
+    || (canUseBlobClass && item instanceof Blob)
+  );
+  const previewFiles = Array.isArray(payload?.files)
+    ? payload.files.filter((item) => isUploadObject(item))
+    : [];
+  if (previewFiles.length > 0) {
+    previewFiles.forEach((item) => {
+      formData.append('files', item);
+    });
+  } else if (isUploadObject(payload?.file)) {
+    formData.append('file', payload.file);
+  }
+  const resolvedTimeout = Number(
+    timeoutMs
+    || contestRuntimeConfig?.api?.uploadTimeoutMs
+    || contestRuntimeConfig?.api?.timeoutMs
+    || 120000
+  );
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/preview`,
+    formData,
+    {
+      headers: {
+        ...(requestId ? { [REQUEST_ID_HEADER]: requestId } : {}),
+        'Content-Type': 'multipart/form-data',
+      },
+      timeout: Number.isFinite(resolvedTimeout) && resolvedTimeout > 0 ? resolvedTimeout : undefined,
+    }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function listCompetitionAIReviewJobsPaged(competitionId, limit = 20, offset = 0, keyword = '', options = {}) {
+  const { status = 'all', requestId } = options;
+  const response = await client.get(`${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/jobs`, {
+    params: { limit, offset, keyword, status },
+    headers: requestIdHeaders(requestId),
+  });
+  return toPagedResult(response, limit, offset, requestId);
+}
+
+export async function getCompetitionAIReviewJobDetail(competitionId, jobId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/jobs/${Number(jobId)}`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function createCompetitionAIReviewJobs(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/jobs`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getCompetitionAIReviewSubmissionDisplay(competitionId, submissionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/submissions/${Number(submissionId)}`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
 export async function sendRegisterCode(payload = {}, options = {}) {
   const { requestId } = options;
   const { data } = await client.post(`${REGISTER_API_PREFIX}/verification-codes`, payload, {
