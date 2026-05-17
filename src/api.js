@@ -360,6 +360,56 @@ export async function getCompetitionById(id, options = {}) {
   };
 }
 
+export async function getCompetitionScoringSettings(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/scoring-settings`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function updateCompetitionScoringSettings(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.put(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/scoring-settings`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function unlockCompetitionScoringSettings(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/scoring-settings/unlock`,
+    {},
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function listScoringRubricVersions(rubricKey, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${CONTEST_API_PREFIX}/scoring/rubrics/${encodeURIComponent(String(rubricKey || '').trim())}/versions`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    items: response?.data?.data?.items || [],
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
 export async function getCompetitionTrainingManualMeta(competitionId, options = {}) {
   const { requestId } = options;
   const response = await client.get(
@@ -563,13 +613,14 @@ export async function listMyAssignedSubmissionsPaged(
 }
 
 export async function getAssignedSubmissionAttachmentBlob(competitionId, submissionId, options = {}) {
-  const { requestId, disposition = 'inline', attachmentExt = 'pdf' } = options;
+  const { requestId, disposition = 'inline', attachmentExt = 'pdf', attachmentKey = '' } = options;
   const response = await client.get(
     `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/judges/me/assigned-submissions/${Number(submissionId)}/attachment`,
     {
       params: {
         disposition,
         attachment_ext: String(attachmentExt || '').trim().toLowerCase().replace(/^\./, '') || 'pdf',
+        attachment_key: String(attachmentKey || '').trim() || undefined,
       },
       headers: requestIdHeaders(requestId),
       responseType: 'blob',
@@ -580,6 +631,8 @@ export async function getAssignedSubmissionAttachmentBlob(competitionId, submiss
     fileName: pickFileName(response?.headers) || '',
     contentType: headerValue(response?.headers || {}, 'Content-Type') || '',
     requestId: pickRequestId(response?.headers) || requestId || '',
+    previewFormat: headerValue(response?.headers || {}, 'X-Contest-Preview-Format') || '',
+    previewConverted: headerValue(response?.headers || {}, 'X-Contest-Preview-Converted') === '1',
   };
 }
 
@@ -590,6 +643,18 @@ export async function getMyAssignedSubmissionReview(competitionId, submissionId,
     {
       headers: requestIdHeaders(requestId),
     }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getAssignedSubmissionReviewContext(competitionId, submissionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/judges/me/assigned-submissions/${Number(submissionId)}/review-context`,
+    { headers: requestIdHeaders(requestId) }
   );
   return {
     data: response?.data?.data || null,
@@ -616,6 +681,120 @@ export async function deleteCompetitionJudge(competitionId, judgeUserId, options
   const { requestId } = options;
   const response = await client.delete(
     `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/judges/${Number(judgeUserId)}`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getCompetitionAIReviewSettings(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(`${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/settings`, {
+    headers: requestIdHeaders(requestId),
+  });
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function updateCompetitionAIReviewSettings(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.put(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/settings`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function previewCompetitionAIReview(competitionId, payload, options = {}) {
+  const { requestId, timeoutMs } = options;
+  const formData = new FormData();
+  formData.append('rubric_key', String(payload?.rubric_key || '').trim());
+  formData.append('model_key', String(payload?.model_key || '').trim());
+  const canUseFileClass = typeof File !== 'undefined';
+  const canUseBlobClass = typeof Blob !== 'undefined';
+  const isUploadObject = (item) => (
+    (canUseFileClass && item instanceof File)
+    || (canUseBlobClass && item instanceof Blob)
+  );
+  const previewFiles = Array.isArray(payload?.files)
+    ? payload.files.filter((item) => isUploadObject(item))
+    : [];
+  if (previewFiles.length > 0) {
+    previewFiles.forEach((item) => {
+      formData.append('files', item);
+    });
+  } else if (isUploadObject(payload?.file)) {
+    formData.append('file', payload.file);
+  }
+  const resolvedTimeout = Number(
+    timeoutMs
+    || contestRuntimeConfig?.api?.uploadTimeoutMs
+    || contestRuntimeConfig?.api?.timeoutMs
+    || 120000
+  );
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/preview`,
+    formData,
+    {
+      headers: {
+        ...(requestId ? { [REQUEST_ID_HEADER]: requestId } : {}),
+        'Content-Type': 'multipart/form-data',
+      },
+      timeout: Number.isFinite(resolvedTimeout) && resolvedTimeout > 0 ? resolvedTimeout : undefined,
+    }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function listCompetitionAIReviewJobsPaged(competitionId, limit = 20, offset = 0, keyword = '', options = {}) {
+  const { status = 'all', requestId } = options;
+  const response = await client.get(`${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/jobs`, {
+    params: { limit, offset, keyword, status },
+    headers: requestIdHeaders(requestId),
+  });
+  return toPagedResult(response, limit, offset, requestId);
+}
+
+export async function getCompetitionAIReviewJobDetail(competitionId, jobId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/jobs/${Number(jobId)}`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function createCompetitionAIReviewJobs(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/jobs`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getCompetitionAIReviewSubmissionDisplay(competitionId, submissionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/submissions/${Number(submissionId)}`,
     { headers: requestIdHeaders(requestId) }
   );
   return {
