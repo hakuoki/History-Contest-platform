@@ -25,20 +25,36 @@ import {
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded';
+import PlayCircleRoundedIcon from '@mui/icons-material/PlayCircleRounded';
+import PauseCircleRoundedIcon from '@mui/icons-material/PauseCircleRounded';
+import TaskAltRoundedIcon from '@mui/icons-material/TaskAltRounded';
+import RadioButtonUncheckedRoundedIcon from '@mui/icons-material/RadioButtonUncheckedRounded';
 import {
+  controlCompetitionAIReviewRunState,
   createCompetitionAIReviewJobs,
   createRequestId,
   getCompetitionAIReviewSettings,
+  getCompetitionScoringSettings,
   listCompetitionSubmissionsPaged,
   previewCompetitionAIReview,
+  resetCompetitionAIReviewToNotStarted,
   updateCompetitionAIReviewSettings,
 } from '../../../api';
 import { getUserFriendlyErrorText } from '../../../utils/errorText';
+import {
+  getAIHitCodeLabel,
+  getAIRubricMinimumPolicy,
+  requiresStrictAIRunMinimums,
+} from '../rules/aiRubricProfiles';
 
 const DEFAULT_MODEL_KEY = 'qwen3_max';
+const DEFAULT_RUNS_PER_MODEL = 5;
 const REVIEWABLE_SUBMISSION_STATUSES = new Set(['submitted', 'resubmitted', 'locked']);
 const SERVICE_UNAVAILABLE_TEXT = '服务暂时不可用，请稍后重试';
 const SUPPORTED_PARSE_FORMATS = ['pdf', 'docx', 'xlsx'];
+const REQUIRED_PARSE_DEFAULT_PRIORITY = ['pdf', 'docx', 'xlsx'];
+const PREVIEW_RESULT_CACHE_KEY = 'contest_ai_review_preview_result_latest_v1';
+const RUNTIME_META_POLL_INTERVAL_MS = 4000;
 const FORMAT_LABEL_MAP = {
   pdf: 'PDF',
   docx: 'DOCX',
@@ -48,17 +64,6 @@ const FORMAT_ACCEPT_MAP = {
   pdf: ['.pdf'],
   docx: ['.doc', '.docx'],
   xlsx: ['.xls', '.xlsx'],
-};
-const HIT_CODE_LABEL_MAP = {
-  fatal_plagiarism: '抄袭',
-  fatal_forgery: '伪造',
-  fatal_distortion: '故意误引',
-  fatal_source_fabrication: '捏造档案',
-  cap_no_research_question: '无研究问题',
-  cap_no_evidence_support: '核心论断无证据支撑',
-  cap_key_fact_error: '关键史料或关键事实严重失实',
-  cap_poor_literature_dialogue: '文献对话或研究定位严重不足',
-  cap_structure_broken: '结构严重失衡',
 };
 const OPTIONAL_PARSE_NONE_TOKEN = '__none__';
 const PREVIEW_ATTACHMENT_THEME = {
@@ -129,13 +134,32 @@ function resolveCompetitionFormatBuckets(competition) {
   return { required: [], optional: allowed };
 }
 
-function normalizeParseSelection(selectedRaw, bucketFormats, enabled = true, fallbackWhenEmpty = true) {
+function pickDefaultRequiredParseFormat(bucketFormats) {
+  const bucket = normalizeFormatList(bucketFormats, []);
+  for (const fmt of REQUIRED_PARSE_DEFAULT_PRIORITY) {
+    if (bucket.includes(fmt)) return fmt;
+  }
+  return bucket[0] || '';
+}
+
+function normalizeParseSelection(
+  selectedRaw,
+  bucketFormats,
+  enabled = true,
+  fallbackWhenEmpty = true,
+  preferSingleWhenEmpty = false
+) {
   if (!enabled) return [];
   const bucket = normalizeFormatList(bucketFormats, []);
   const bucketSet = new Set(bucket);
   const selected = normalizeFormatList(selectedRaw, []).filter((fmt) => bucketSet.has(fmt));
   if (selected.length) return selected;
-  return fallbackWhenEmpty ? [...bucket] : [];
+  if (!fallbackWhenEmpty) return [];
+  if (preferSingleWhenEmpty) {
+    const preferred = pickDefaultRequiredParseFormat(bucket);
+    return preferred ? [preferred] : [];
+  }
+  return [...bucket];
 }
 
 function formatLabel(token) {
@@ -213,7 +237,7 @@ function buildAISettingsSnapshot({
   return {
     selected_model_keys: normalizedModels,
     rubric_key: rubricKey,
-    runs_per_model: Math.max(1, Number(runsPerModel || 1)),
+    runs_per_model: Math.max(1, Number(runsPerModel || DEFAULT_RUNS_PER_MODEL)),
     max_input_chars: Math.max(1000, Number(maxInputChars || 40000)),
     required_parse_formats: requiredFormats,
     optional_parse_formats: optionalFormats,
@@ -234,17 +258,50 @@ function buildAISettingsSignature(snapshot) {
 }
 
 function NumberField({ label, value, onChange, min, max, step = 1, helperText, disabled }) {
+  const [draftValue, setDraftValue] = useState(
+    value === null || value === undefined || value === '' ? '' : String(value)
+  );
+
+  useEffect(() => {
+    if (value === null || value === undefined || value === '') {
+      setDraftValue('');
+      return;
+    }
+    setDraftValue(String(value));
+  }, [value]);
+
   return (
     <TextField
       fullWidth
       size="small"
       type="number"
       label={label}
-      value={value}
+      value={draftValue}
       disabled={disabled}
       inputProps={{ min, max, step }}
       helperText={helperText}
-      onChange={(event) => onChange(Number(event.target.value || 0))}
+      onChange={(event) => {
+        const raw = String(event.target.value ?? '');
+        setDraftValue(raw);
+        if (raw === '') {
+          onChange('');
+          return;
+        }
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) {
+          onChange(parsed);
+        }
+      }}
+      onBlur={() => {
+        if (draftValue === '') return;
+        const parsed = Number(draftValue);
+        if (!Number.isFinite(parsed)) return;
+        let normalized = parsed;
+        if (Number.isFinite(Number(min))) normalized = Math.max(Number(min), normalized);
+        if (Number.isFinite(Number(max))) normalized = Math.min(Number(max), normalized);
+        setDraftValue(String(normalized));
+        onChange(normalized);
+      }}
     />
   );
 }
@@ -258,6 +315,86 @@ function toBoolFlag(value) {
   if (['true', 'yes', 'on'].includes(text)) return true;
   if (['false', 'no', 'off'].includes(text)) return false;
   return Boolean(value);
+}
+
+function normalizeReviewRunState(value) {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'running' || token === 'paused' || token === 'not_started' || token === 'completed') return token;
+  if (token === 'start' || token === 'resume') return 'running';
+  if (token === 'pause') return 'paused';
+  return 'not_started';
+}
+
+function resolveDisplayReviewRunState(runState, { runningJobCount = 0, pendingJobCount = 0, activeJobCount = 0 } = {}) {
+  const normalizedState = normalizeReviewRunState(runState);
+  if (normalizedState === 'completed') return 'completed';
+  if (normalizedState !== 'running') return normalizedState;
+  const countValues = [runningJobCount, pendingJobCount, activeJobCount];
+  const hasReliableCounters = countValues.every((value) => (
+    value !== null
+    && value !== undefined
+    && value !== ''
+    && Number.isFinite(Number(value))
+  ));
+  if (!hasReliableCounters) return 'running';
+  const running = Math.max(0, Number(runningJobCount || 0));
+  const pending = Math.max(0, Number(pendingJobCount || 0));
+  const active = Math.max(0, Number(activeJobCount || 0));
+  if (running <= 0 && pending <= 0 && active <= 0) return 'completed';
+  return 'running';
+}
+
+function getReviewRunStateChipMeta(state) {
+  const key = normalizeReviewRunState(state);
+  if (key === 'completed') {
+    return {
+      label: '完成',
+      color: 'success',
+      icon: <TaskAltRoundedIcon fontSize="small" />,
+    };
+  }
+  if (key === 'running') {
+    return {
+      label: '运行中',
+      color: 'warning',
+      icon: <PlayCircleRoundedIcon fontSize="small" />,
+    };
+  }
+  if (key === 'paused') {
+    return {
+      label: '暂停',
+      color: 'warning',
+      icon: <PauseCircleRoundedIcon fontSize="small" />,
+    };
+  }
+  return {
+    label: '未开始',
+    color: 'default',
+    icon: <RadioButtonUncheckedRoundedIcon fontSize="small" />,
+  };
+}
+
+function shouldUseNewDefaultRunsPerModel(settings) {
+  const runsMin = Number(settings?.runs_per_model_min);
+  const runsMax = Number(settings?.runs_per_model_max);
+  if (runsMin !== 3 || runsMax !== 3) return false;
+  const requiredFormats = normalizeFormatList(settings?.required_parse_formats, []);
+  const optionalFormats = normalizeFormatList(settings?.optional_parse_formats, []);
+  if (requiredFormats.length > 0 || optionalFormats.length > 0) return false;
+  if (!toBoolFlag(settings?.parse_required_formats ?? true)) return false;
+  if (!toBoolFlag(settings?.parse_optional_formats ?? true)) return false;
+  const createdAtMs = toDateMs(settings?.created_at);
+  const updatedAtMs = toDateMs(settings?.updated_at);
+  return createdAtMs !== null && updatedAtMs !== null && createdAtMs === updatedAtMs;
+}
+
+function formatDateTimeText(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  const timestamp = date.getTime();
+  if (!Number.isFinite(timestamp)) return '-';
+  const pad = (num) => String(num).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function toDateMs(value) {
@@ -304,7 +441,7 @@ async function loadReviewableSubmissionIds(competitionId) {
     if (!rows.length || offset >= total) break;
   }
 
-  return [...new Set(ids)];
+  return [...new Set(ids)].sort((a, b) => a - b);
 }
 
 function formatPreviewJson(value) {
@@ -317,15 +454,65 @@ function formatPreviewJson(value) {
   }
 }
 
-function formatPreviewHitText(hit) {
+function formatPreviewHitText(hit, rubricKey = '') {
   const source = (hit && typeof hit === 'object')
     ? hit
     : { code: String(hit || '').trim() };
   const code = String(source?.code || '').trim();
-  const codeLabel = HIT_CODE_LABEL_MAP[code] || code;
+  const codeLabel = getAIHitCodeLabel(code, rubricKey);
   const comment = String(source?.comment || '').trim();
   if (codeLabel && comment && comment !== code && comment !== codeLabel) return `${codeLabel}（${comment}）`;
   return codeLabel || comment;
+}
+
+function resolvePreviewStructuredOutput(run) {
+  const parsedPayload = run?.parsed_json;
+  if (parsedPayload && typeof parsedPayload === 'object') {
+    const text = formatPreviewJson(parsedPayload);
+    if (text) return text;
+  }
+  const rawOutput = String(run?.raw_response_text || '').trim();
+  if (!rawOutput) return '';
+  try {
+    const parsedFromRaw = JSON.parse(rawOutput);
+    return formatPreviewJson(parsedFromRaw);
+  } catch {
+    return '';
+  }
+}
+
+function loadPreviewResultCache() {
+  if (typeof window === 'undefined' || !window.localStorage) return null;
+  try {
+    const raw = window.localStorage.getItem(PREVIEW_RESULT_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const result = (parsed.result && typeof parsed.result === 'object') ? parsed.result : null;
+    if (!result) return null;
+    return {
+      result,
+      updatedAt: typeof parsed.updated_at === 'string' ? parsed.updated_at : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function savePreviewResultCache(result, updatedAt) {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  if (!result || typeof result !== 'object') return;
+  try {
+    window.localStorage.setItem(
+      PREVIEW_RESULT_CACHE_KEY,
+      JSON.stringify({
+        updated_at: String(updatedAt || ''),
+        result,
+      })
+    );
+  } catch {
+    // ignore storage quota / serialization failures
+  }
 }
 
 function AIReviewPreviewDialog({
@@ -363,6 +550,8 @@ function AIReviewPreviewDialog({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewErrorText, setPreviewErrorText] = useState('');
   const [previewResult, setPreviewResult] = useState(null);
+  const [previewResultUpdatedAt, setPreviewResultUpdatedAt] = useState('');
+  const [previewResultLoadedFromCache, setPreviewResultLoadedFromCache] = useState(false);
   const selectedPreviewFileEntries = useMemo(
     () => allowedPreviewFormats
       .map((fmt) => {
@@ -379,12 +568,16 @@ function AIReviewPreviewDialog({
 
   useEffect(() => {
     if (!open) return;
-    setPreviewModelKey(availableModelKeys[0] || '');
+    const cached = loadPreviewResultCache();
+    const cachedModelKey = String(cached?.result?.model_key || '').trim();
+    setPreviewModelKey(cachedModelKey || availableModelKeys[0] || '');
     setPreviewFilesByFormat({});
     setPreviewLoading(false);
     setPreviewErrorText('');
-    setPreviewResult(null);
-  }, [allowedPreviewFormats, availableModelKeys, open]);
+    setPreviewResult(cached?.result || null);
+    setPreviewResultUpdatedAt(String(cached?.updatedAt || ''));
+    setPreviewResultLoadedFromCache(Boolean(cached?.result));
+  }, [competitionId, open]);
 
   useEffect(() => {
     if (!open || !previewModelKey) return;
@@ -411,6 +604,8 @@ function AIReviewPreviewDialog({
       setPreviewFilesByFormat((prev) => ({ ...prev, [formatToken]: null }));
       setPreviewErrorText('');
       setPreviewResult(null);
+      setPreviewResultUpdatedAt('');
+      setPreviewResultLoadedFromCache(false);
       if (fileInput) fileInput.value = '';
       return;
     }
@@ -419,6 +614,8 @@ function AIReviewPreviewDialog({
     if (ext !== canonicalSlotFormat) {
       setPreviewFilesByFormat((prev) => ({ ...prev, [canonicalSlotFormat]: null }));
       setPreviewResult(null);
+      setPreviewResultUpdatedAt('');
+      setPreviewResultLoadedFromCache(false);
       setPreviewErrorText(
         `当前槽位为 ${formatLabel(canonicalSlotFormat)}，请上传对应文件`
       );
@@ -428,6 +625,8 @@ function AIReviewPreviewDialog({
     setPreviewFilesByFormat((prev) => ({ ...prev, [canonicalSlotFormat]: nextFile }));
     setPreviewErrorText('');
     setPreviewResult(null);
+    setPreviewResultUpdatedAt('');
+    setPreviewResultLoadedFromCache(false);
     if (fileInput) fileInput.value = '';
   };
 
@@ -436,6 +635,8 @@ function AIReviewPreviewDialog({
     setPreviewFilesByFormat((prev) => ({ ...prev, [canonicalSlotFormat]: null }));
     setPreviewErrorText('');
     setPreviewResult(null);
+    setPreviewResultUpdatedAt('');
+    setPreviewResultLoadedFromCache(false);
   };
 
   const runPreview = async () => {
@@ -457,6 +658,10 @@ function AIReviewPreviewDialog({
         { requestId: createRequestId() }
       );
       setPreviewResult(data);
+      const updatedAt = new Date().toISOString();
+      setPreviewResultUpdatedAt(updatedAt);
+      setPreviewResultLoadedFromCache(false);
+      savePreviewResultCache(data, updatedAt);
       if (typeof setMessage === 'function') {
         setMessage({ type: 'success', text: 'AI 评审预览已完成' });
       }
@@ -473,11 +678,15 @@ function AIReviewPreviewDialog({
 
   const previewRun = previewResult?.run || {};
   const selectedModelName = availableModelMap.get(previewModelKey)?.name || previewModelKey || '-';
+  const previewResultTimeText = formatDateTimeText(previewResultUpdatedAt);
   const parsedResult = (previewRun?.parsed_json && typeof previewRun.parsed_json === 'object') ? previewRun.parsed_json : {};
+  const previewRubricKey = String(previewResult?.rubric_key || selectedRubricKey || '').trim();
   const fatalHits = Array.isArray(parsedResult?.fatal_hits) ? parsedResult.fatal_hits : [];
   const capHits = Array.isArray(parsedResult?.cap_hits) ? parsedResult.cap_hits : [];
-  const fatalHitText = fatalHits.map(formatPreviewHitText).filter(Boolean).join('；');
-  const capHitText = capHits.map(formatPreviewHitText).filter(Boolean).join('；');
+  const fatalHitText = fatalHits.map((hit) => formatPreviewHitText(hit, previewRubricKey)).filter(Boolean).join('；');
+  const capHitText = capHits.map((hit) => formatPreviewHitText(hit, previewRubricKey)).filter(Boolean).join('；');
+  const structuredPreviewOutput = resolvePreviewStructuredOutput(previewRun);
+  const rawPreviewOutputText = String(previewRun?.raw_response_text || '').trim();
   const finalSummaryText = [
     `总分：${previewRun.score ?? '-'}`,
     `等级：${previewRun.final_grade || '-'}`,
@@ -678,6 +887,12 @@ function AIReviewPreviewDialog({
 
           {previewResult && (
             <Stack spacing={2}>
+              {previewResultLoadedFromCache && (
+                <Alert severity="info">
+                  已加载上一次预览结果
+                  {previewResultTimeText !== '-' ? `（${previewResultTimeText}）` : ''}。
+                </Alert>
+              )}
               <Alert severity="success">
                 预览完成，等级 {previewRun.final_grade || '-'}，得分 {previewRun.score ?? '-'}。
               </Alert>
@@ -742,8 +957,8 @@ function AIReviewPreviewDialog({
               <TextField
                 fullWidth
                 size="small"
-                label="模型原始输出"
-                value={previewRun.raw_response_text || ''}
+                label="结构化输出（parsed_json）"
+                value={structuredPreviewOutput || '（无可结构化内容）'}
                 multiline
                 minRows={8}
                 InputProps={{
@@ -751,6 +966,34 @@ function AIReviewPreviewDialog({
                   sx: { fontFamily: 'monospace', alignItems: 'flex-start' },
                 }}
               />
+              {rawPreviewOutputText ? (
+                <Box
+                  component="details"
+                  sx={{
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    borderRadius: 1,
+                    p: 1,
+                  }}
+                >
+                  <Box component="summary" sx={{ cursor: 'pointer', fontSize: 13 }}>
+                    查看原始输出（raw_response_text）
+                  </Box>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="模型原始输出"
+                    value={rawPreviewOutputText}
+                    multiline
+                    minRows={6}
+                    sx={{ mt: 1 }}
+                    InputProps={{
+                      readOnly: true,
+                      sx: { fontFamily: 'monospace', alignItems: 'flex-start' },
+                    }}
+                  />
+                </Box>
+              ) : null}
             </Stack>
           )}
         </Stack>
@@ -777,6 +1020,7 @@ export default function AIReviewSettingsDialog({
   competition,
   onClose,
   setMessage,
+  onOpenProgress,
 }) {
   const competitionId = Number(competition?.id || 0);
   const competitionName = competition?.name || competition?.title || competitionId || '-';
@@ -788,7 +1032,7 @@ export default function AIReviewSettingsDialog({
   const [enabled, setEnabled] = useState(true);
   const [selectedModelKeys, setSelectedModelKeys] = useState([]);
   const [selectedRubricKey, setSelectedRubricKey] = useState('');
-  const [runsPerModel, setRunsPerModel] = useState(5);
+  const [runsPerModel, setRunsPerModel] = useState(DEFAULT_RUNS_PER_MODEL);
   const [maxInputChars, setMaxInputChars] = useState(40000);
   const [requiredParseFormats, setRequiredParseFormats] = useState([]);
   const [optionalParseFormats, setOptionalParseFormats] = useState([]);
@@ -805,7 +1049,18 @@ export default function AIReviewSettingsDialog({
   });
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
   const [startConfirmSnapshot, setStartConfirmSnapshot] = useState(null);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [resettingReview, setResettingReview] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [reviewRunState, setReviewRunState] = useState('not_started');
+  const [workerAvailable, setWorkerAvailable] = useState(false);
+  const [workerSchedulerRunning, setWorkerSchedulerRunning] = useState(false);
+  const [workerLastTickAt, setWorkerLastTickAt] = useState(null);
+  const [runningJobCount, setRunningJobCount] = useState(null);
+  const [pendingJobCount, setPendingJobCount] = useState(null);
+  const [activeJobCount, setActiveJobCount] = useState(null);
+  const [scoringAIReviewEnabled, setScoringAIReviewEnabled] = useState(true);
 
   const selectedModelKeySet = useMemo(() => new Set(selectedModelKeys), [selectedModelKeys]);
   const mandatoryModelKeys = useMemo(
@@ -862,24 +1117,78 @@ export default function AIReviewSettingsDialog({
   );
   const hasUnsavedChanges = Boolean(savedSettingsSignature && currentSettingsSignature && savedSettingsSignature !== currentSettingsSignature);
   const reviewWindowOpen = isManualReviewWindowOpen(competition);
+  const normalizedReviewRunState = normalizeReviewRunState(reviewRunState);
+  const displayReviewRunState = resolveDisplayReviewRunState(normalizedReviewRunState, {
+    runningJobCount,
+    pendingJobCount,
+    activeJobCount,
+  });
+  const reviewRunStateChipMeta = getReviewRunStateChipMeta(displayReviewRunState);
+  const runControlMode = displayReviewRunState === 'running'
+    ? 'pause'
+    : (displayReviewRunState === 'paused' ? 'resume' : 'start');
+  const runControlButtonLabel = runControlMode === 'pause'
+    ? '暂停评审'
+    : (runControlMode === 'resume' ? '继续评审' : '开始评审');
+  const reviewControlsLocked = displayReviewRunState !== 'not_started';
+  const activeRubricKey = normalizeSelectedRubricKey(rubricCatalog, selectedRubricKey);
+  const minimumPolicy = getAIRubricMinimumPolicy(activeRubricKey);
+  const strictMinimumsEnabled = requiresStrictAIRunMinimums(activeRubricKey);
+  const strictMinimumRuleName = String(minimumPolicy?.rule_display_name || '当前规则');
+  const minRequiredRunsPerModel = Math.max(1, Number(minimumPolicy?.min_runs_per_model || 1));
+  const minRequiredModelCount = Math.max(1, Number(minimumPolicy?.min_selected_model_count || 1));
+  const scoringDisabled = !scoringAIReviewEnabled;
   const hideWindowClosedServiceError = !reviewWindowOpen && errorText === SERVICE_UNAVAILABLE_TEXT;
   const shouldSuppressWindowClosedServiceError = (text) => (
     !reviewWindowOpen && String(text || '').trim() === SERVICE_UNAVAILABLE_TEXT
   );
 
+  const syncRuntimeStateFromSettings = (data) => {
+    const nextSettings = data?.settings || null;
+    setReviewRunState(normalizeReviewRunState(data?.review_run_state ?? nextSettings?.review_run_state));
+    setWorkerAvailable(toBoolFlag(data?.worker_available));
+    setWorkerSchedulerRunning(toBoolFlag(data?.worker_scheduler_running));
+    setWorkerLastTickAt(data?.worker_last_tick_at || null);
+    setRunningJobCount(
+      data?.running_job_count === undefined || data?.running_job_count === null
+        ? null
+        : Number(data.running_job_count || 0)
+    );
+    setPendingJobCount(
+      data?.pending_job_count === undefined || data?.pending_job_count === null
+        ? null
+        : Number(data.pending_job_count || 0)
+    );
+    setActiveJobCount(
+      data?.active_job_count === undefined || data?.active_job_count === null
+        ? null
+        : Number(data.active_job_count || 0)
+    );
+  };
+
   const syncStateFromSettings = (data) => {
     const nextSettings = data?.settings || null;
     const nextCatalog = Array.isArray(data?.model_catalog) ? data.model_catalog : [];
     const nextRubricCatalog = Array.isArray(data?.rubric_catalog) ? data.rubric_catalog : [];
+    const nextRubricKey = normalizeSelectedRubricKey(nextRubricCatalog, nextSettings?.rubric_key);
+    const nextMinRequiredRunsPerModel = Math.max(
+      1,
+      Number(getAIRubricMinimumPolicy(nextRubricKey)?.min_runs_per_model || 1)
+    );
     const runCandidates = [
       Number(nextSettings?.runs_per_model_min),
       Number(nextSettings?.runs_per_model_max),
     ].filter((value) => Number.isFinite(value) && value > 0);
-    const nextRunsPerModel = runCandidates.length > 0 ? Math.max(...runCandidates) : 5;
+    let nextRunsPerModel = runCandidates.length > 0 ? Math.max(...runCandidates) : DEFAULT_RUNS_PER_MODEL;
+    if (runCandidates.length > 0 && shouldUseNewDefaultRunsPerModel(nextSettings)) {
+      nextRunsPerModel = DEFAULT_RUNS_PER_MODEL;
+    }
+    nextRunsPerModel = Math.max(nextMinRequiredRunsPerModel, Number(nextRunsPerModel || DEFAULT_RUNS_PER_MODEL));
     const nextRequiredParseFormats = normalizeParseSelection(
       nextSettings?.required_parse_formats,
       requiredFormatOptions,
       toBoolFlag(nextSettings?.parse_required_formats ?? true),
+      true,
       true
     );
     const nextOptionalParseFormats = normalizeParseSelection(
@@ -901,7 +1210,7 @@ export default function AIReviewSettingsDialog({
       normalizeSelectedModelKeys(nextCatalog, nextSettings?.selected_model_keys || [])
     );
     setSelectedRubricKey(
-      normalizeSelectedRubricKey(nextRubricCatalog, nextSettings?.rubric_key)
+      nextRubricKey
     );
     setRunsPerModel(Number(nextRunsPerModel));
     setMaxInputChars(Number(Math.max(1000, Number(nextSettings?.max_input_chars || 40000))));
@@ -911,6 +1220,7 @@ export default function AIReviewSettingsDialog({
     setRequestPolicySnapshot(nextRequestPolicySnapshot);
     setLocked(toBoolFlag(data?.locked) || nextSettings?.status === 'locked');
     setCanEdit(toBoolFlag(data?.can_edit));
+    syncRuntimeStateFromSettings(data);
     setSettingsEditing(false);
     const nextSignature = buildAISettingsSignature(buildAISettingsSnapshot({
       modelCatalog: nextCatalog,
@@ -944,14 +1254,22 @@ export default function AIReviewSettingsDialog({
 
     (async () => {
       try {
-        const { data } = await getCompetitionAIReviewSettings(competitionId, {
-          requestId: createRequestId(),
-        });
+        const [settingsResp, scoringResp] = await Promise.all([
+          getCompetitionAIReviewSettings(competitionId, {
+            requestId: createRequestId(),
+          }),
+          getCompetitionScoringSettings(competitionId, {
+            requestId: createRequestId(),
+          }).catch(() => null),
+        ]);
+        const data = settingsResp?.data || null;
         if (cancelled) return;
         syncStateFromSettings(data);
+        const scoringData = scoringResp?.data || null;
+        setScoringAIReviewEnabled(toBoolFlag(scoringData?.settings?.ai_review_enabled, true));
       } catch (error) {
         if (cancelled) return;
-        const text = getUserFriendlyErrorText(error, '加载 AI 评审配置失败');
+        const text = getUserFriendlyErrorText(error, '加载 AI 评审信息失败');
         setErrorText(text);
         if (typeof setMessage === 'function' && !shouldSuppressWindowClosedServiceError(text)) {
           setMessage({ type: 'error', text });
@@ -967,6 +1285,44 @@ export default function AIReviewSettingsDialog({
   }, [competitionId, open, setMessage]);
 
   useEffect(() => {
+    if (!open || !competitionId) return undefined;
+
+    let cancelled = false;
+    let timerId = null;
+
+    const scheduleNext = (delayMs = RUNTIME_META_POLL_INTERVAL_MS) => {
+      if (cancelled) return;
+      if (timerId) window.clearTimeout(timerId);
+      timerId = window.setTimeout(() => {
+        void pollRuntimeState();
+      }, Math.max(2000, Number(delayMs || 0)));
+    };
+
+    const pollRuntimeState = async () => {
+      if (cancelled) return;
+      try {
+        const settingsResp = await getCompetitionAIReviewSettings(competitionId, {
+          requestId: createRequestId(),
+        });
+        if (cancelled) return;
+        const data = settingsResp?.data || null;
+        syncRuntimeStateFromSettings(data);
+      } catch {
+        // 静默轮询：状态刷新失败不打断当前页面操作。
+      } finally {
+        scheduleNext(RUNTIME_META_POLL_INTERVAL_MS);
+      }
+    };
+
+    scheduleNext(RUNTIME_META_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      if (timerId) window.clearTimeout(timerId);
+    };
+  }, [competitionId, open]);
+
+  useEffect(() => {
     if (!open || reviewWindowOpen) return;
     if (errorText === SERVICE_UNAVAILABLE_TEXT) {
       setErrorText('');
@@ -977,9 +1333,20 @@ export default function AIReviewSettingsDialog({
     if (!open) {
       setStartConfirmOpen(false);
       setStartConfirmSnapshot(null);
+      setResetConfirmOpen(false);
+      setResetConfirmPassword('');
+      setResettingReview(false);
       setPreviewOpen(false);
       setSavedSettingsSignature('');
       setSettingsEditing(false);
+      setReviewRunState('not_started');
+      setWorkerAvailable(false);
+      setWorkerSchedulerRunning(false);
+      setWorkerLastTickAt(null);
+      setRunningJobCount(null);
+      setPendingJobCount(null);
+      setActiveJobCount(null);
+      setScoringAIReviewEnabled(true);
     }
   }, [open]);
 
@@ -997,6 +1364,68 @@ export default function AIReviewSettingsDialog({
   const persistSettings = async () => {
     if (!competitionId) return null;
 
+    const normalizedModelKeys = normalizeSelectedModelKeys(modelCatalog, selectedModelKeys);
+    const normalizedRubricKey = normalizeSelectedRubricKey(rubricCatalog, selectedRubricKey);
+    if (!normalizedRubricKey) {
+      throw new Error('请选择AI评审规则');
+    }
+    const selectedRubricPolicy = getAIRubricMinimumPolicy(normalizedRubricKey);
+    const strictMinimums = Boolean(selectedRubricPolicy?.enabled);
+    const strictRuleDisplayName = String(selectedRubricPolicy?.rule_display_name || '当前规则');
+    const minSelectedModelCount = Math.max(1, Number(selectedRubricPolicy?.min_selected_model_count || 1));
+    const minRunsPerModel = Math.max(1, Number(selectedRubricPolicy?.min_runs_per_model || 1));
+    if (normalizedModelKeys.length < minSelectedModelCount) {
+      if (strictMinimums) {
+        throw new Error(`${strictRuleDisplayName}下，请至少选择 ${minSelectedModelCount} 个AI评委模型`);
+      }
+      throw new Error('请至少选择一个AI评委模型');
+    }
+
+    const runsRaw = String(runsPerModel ?? '').trim();
+    if (!runsRaw) {
+      throw new Error('请填写“同一个模型评审次数”');
+    }
+    const runsValue = Number(runsRaw);
+    if (!Number.isFinite(runsValue) || !Number.isInteger(runsValue)) {
+      throw new Error('“同一个模型评审次数”必须为整数');
+    }
+    if (runsValue < minRunsPerModel || runsValue > 10) {
+      if (strictMinimums) {
+        throw new Error(`${strictRuleDisplayName}下，“同一个模型评审次数”必须在 ${minRunsPerModel}-10 之间`);
+      }
+      throw new Error('“同一个模型评审次数”必须在 1-10 之间');
+    }
+
+    const maxInputRaw = String(maxInputChars ?? '').trim();
+    if (!maxInputRaw) {
+      throw new Error('请填写“评审文本上限字符数”');
+    }
+    const maxInputValue = Number(maxInputRaw);
+    if (!Number.isFinite(maxInputValue) || !Number.isInteger(maxInputValue)) {
+      throw new Error('“评审文本上限字符数”必须为整数');
+    }
+    if (maxInputValue < 1000 || maxInputValue > 500000) {
+      throw new Error('“评审文本上限字符数”必须在 1000-500000 之间');
+    }
+
+    const timeoutValue = Number(requestPolicySnapshot.timeout_seconds);
+    if (!Number.isFinite(timeoutValue) || timeoutValue < 1 || timeoutValue > 3600) {
+      throw new Error('超时秒数配置非法，请刷新后重试');
+    }
+    const retryValue = Number(requestPolicySnapshot.retry_count);
+    if (!Number.isFinite(retryValue) || !Number.isInteger(retryValue) || retryValue < 0 || retryValue > 10) {
+      throw new Error('重试次数配置非法，请刷新后重试');
+    }
+    const temperatureValue = Number(requestPolicySnapshot.temperature);
+    if (!Number.isFinite(temperatureValue) || temperatureValue < 0 || temperatureValue > 2) {
+      throw new Error('采样温度配置非法，请刷新后重试');
+    }
+    const maxOutputTokensValue = Number(requestPolicySnapshot.max_output_tokens);
+    if (!Number.isFinite(maxOutputTokensValue) || !Number.isInteger(maxOutputTokensValue)
+      || maxOutputTokensValue < 256 || maxOutputTokensValue > 65536) {
+      throw new Error('输出Token上限配置非法，请刷新后重试');
+    }
+
     const requiredSelected = normalizeFormatList(requiredParseFormats, []).filter((fmt) => requiredFormatOptions.includes(fmt));
     const optionalSelected = normalizeFormatList(optionalParseFormats, []).filter((fmt) => optionalFormatOptions.includes(fmt));
     if (!requiredSelected.length && !optionalSelected.length) {
@@ -1004,15 +1433,15 @@ export default function AIReviewSettingsDialog({
     }
 
     const payload = {
-      selected_model_keys: normalizeSelectedModelKeys(modelCatalog, selectedModelKeys),
-      rubric_key: normalizeSelectedRubricKey(rubricCatalog, selectedRubricKey),
-      runs_per_model_min: runsPerModel,
-      runs_per_model_max: runsPerModel,
-      timeout_seconds: Math.max(1, Number(requestPolicySnapshot.timeout_seconds || 180)),
-      retry_count: Math.max(0, Number(requestPolicySnapshot.retry_count || 2)),
-      temperature: Number(requestPolicySnapshot.temperature ?? 0.2),
-      max_input_chars: Math.max(1000, Number(maxInputChars || 40000)),
-      max_output_tokens: Math.max(256, Number(requestPolicySnapshot.max_output_tokens || 8000)),
+      selected_model_keys: normalizedModelKeys,
+      rubric_key: normalizedRubricKey,
+      runs_per_model_min: runsValue,
+      runs_per_model_max: runsValue,
+      timeout_seconds: timeoutValue,
+      retry_count: retryValue,
+      temperature: temperatureValue,
+      max_input_chars: maxInputValue,
+      max_output_tokens: maxOutputTokensValue,
       parse_required_formats: requiredSelected.length > 0,
       parse_optional_formats: optionalSelected.length > 0,
       required_parse_formats: requiredSelected,
@@ -1042,6 +1471,7 @@ export default function AIReviewSettingsDialog({
       settings?.required_parse_formats,
       requiredFormatOptions,
       toBoolFlag(settings?.parse_required_formats ?? true),
+      true,
       true
     );
     const optionalSelected = normalizeParseSelection(
@@ -1072,12 +1502,12 @@ export default function AIReviewSettingsDialog({
     try {
       await persistSettings();
       setSettingsEditing(false);
-      const successText = 'AI 评审配置已保存';
+      const successText = 'AI评审参数已保存';
       if (typeof setMessage === 'function') {
         setMessage({ type: 'success', text: successText });
       }
     } catch (error) {
-      const text = getUserFriendlyErrorText(error, '保存 AI 评审配置失败');
+      const text = getUserFriendlyErrorText(error, '保存 AI评审参数失败');
       setErrorText(text);
       if (typeof setMessage === 'function' && !shouldSuppressWindowClosedServiceError(text)) {
         setMessage({ type: 'error', text });
@@ -1088,7 +1518,7 @@ export default function AIReviewSettingsDialog({
   };
 
   const confirmStartReview = async () => {
-    if (!competitionId || loading || saving || locked || !canEdit || !enabled) return;
+    if (!competitionId || loading || saving || locked || !canEdit || !enabled || scoringDisabled) return;
     if (!reviewWindowOpen) {
       return;
     }
@@ -1114,6 +1544,12 @@ export default function AIReviewSettingsDialog({
         },
         { requestId: createRequestId() }
       );
+      const controlResp = await controlCompetitionAIReviewRunState(
+        competitionId,
+        { action: 'start' },
+        { requestId: createRequestId() }
+      );
+      syncStateFromSettings(controlResp?.data);
       const jobCount = Array.isArray(data?.items) ? data.items.length : Number(data?.pagination?.total || 0);
       const successText = jobCount > 0
         ? `已开始评审，已提交 ${jobCount} 个任务`
@@ -1132,8 +1568,54 @@ export default function AIReviewSettingsDialog({
     }
   };
 
+  const pauseReview = async () => {
+    if (!competitionId || loading || saving || locked || !canEdit || !enabled || scoringDisabled) return;
+    setSaving(true);
+    setErrorText('');
+    try {
+      const { data } = await controlCompetitionAIReviewRunState(
+        competitionId,
+        { action: 'pause' },
+        { requestId: createRequestId() }
+      );
+      syncStateFromSettings(data);
+      setMessage?.({ type: 'success', text: 'AI评审已暂停' });
+    } catch (error) {
+      const text = getUserFriendlyErrorText(error, '暂停 AI 评审失败');
+      setErrorText(text);
+      if (typeof setMessage === 'function' && !shouldSuppressWindowClosedServiceError(text)) {
+        setMessage({ type: 'error', text });
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const resumeReview = async () => {
+    if (!competitionId || loading || saving || locked || !canEdit || !enabled || scoringDisabled || !reviewWindowOpen) return;
+    setSaving(true);
+    setErrorText('');
+    try {
+      const { data } = await controlCompetitionAIReviewRunState(
+        competitionId,
+        { action: 'resume' },
+        { requestId: createRequestId() }
+      );
+      syncStateFromSettings(data);
+      setMessage?.({ type: 'success', text: 'AI评审已继续运行' });
+    } catch (error) {
+      const text = getUserFriendlyErrorText(error, '继续 AI 评审失败');
+      setErrorText(text);
+      if (typeof setMessage === 'function' && !shouldSuppressWindowClosedServiceError(text)) {
+        setMessage({ type: 'error', text });
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const startReview = async () => {
-    if (!competitionId || loading || saving || locked || !canEdit || !enabled || !reviewWindowOpen) return;
+    if (!competitionId || loading || saving || locked || !canEdit || !enabled || scoringDisabled || !reviewWindowOpen) return;
     if (settingsEditing || hasUnsavedChanges) {
       const text = '请先保存参数后再开始评审';
       setMessage?.({ type: 'warning', text });
@@ -1147,7 +1629,7 @@ export default function AIReviewSettingsDialog({
       setStartConfirmSnapshot(snapshot);
       setStartConfirmOpen(true);
     } catch (error) {
-      const text = getUserFriendlyErrorText(error, '保存 AI 评审配置失败');
+      const text = getUserFriendlyErrorText(error, '保存 AI评审参数失败');
       setErrorText(text);
       if (typeof setMessage === 'function' && !shouldSuppressWindowClosedServiceError(text)) {
         setMessage({ type: 'error', text });
@@ -1157,50 +1639,131 @@ export default function AIReviewSettingsDialog({
     }
   };
 
+  const handleRunControl = async () => {
+    if (displayReviewRunState === 'completed') {
+      setMessage?.({ type: 'info', text: '当前评审已完成，如需重新评审请先点击“重置评审”。' });
+      return;
+    }
+    if (runControlMode === 'pause') {
+      await pauseReview();
+      return;
+    }
+    if (runControlMode === 'resume') {
+      await resumeReview();
+      return;
+    }
+    await startReview();
+  };
+
+  const openResetConfirmDialog = () => {
+    if (!competitionId || loading || saving || resettingReview || scoringDisabled) return;
+    setResetConfirmPassword('');
+    setResetConfirmOpen(true);
+  };
+
+  const resetAIReviewToNotStarted = async () => {
+    if (!competitionId || loading || saving || resettingReview) return;
+    const normalizedPassword = String(resetConfirmPassword || '');
+    if (!normalizedPassword) {
+      setMessage?.({ type: 'warning', text: '请输入密码后二次确认重置评审' });
+      return;
+    }
+    setResettingReview(true);
+    setErrorText('');
+    try {
+      const { data } = await resetCompetitionAIReviewToNotStarted(
+        competitionId,
+        {
+          confirm_password: normalizedPassword,
+        },
+        { requestId: createRequestId() }
+      );
+      const settingsResponse = data?.settings_response || null;
+      if (settingsResponse) {
+        syncStateFromSettings(settingsResponse);
+      } else {
+        const settingsResp = await getCompetitionAIReviewSettings(competitionId, {
+          requestId: createRequestId(),
+        });
+        syncStateFromSettings(settingsResp?.data || null);
+      }
+      const summary = data?.reset_summary || {};
+      const deletedJobs = Number(summary?.deleted_job_count || 0);
+      const deletedModelJobs = Number(summary?.deleted_model_job_count || 0);
+      const deletedRuns = Number(summary?.deleted_run_record_count || 0);
+      setStartConfirmOpen(false);
+      setStartConfirmSnapshot(null);
+      setResetConfirmOpen(false);
+      setResetConfirmPassword('');
+      setMessage?.({
+        type: 'success',
+        text: `已重置评审：删除任务 ${deletedJobs} 条、模型任务 ${deletedModelJobs} 条、运行记录 ${deletedRuns} 条`,
+      });
+    } catch (error) {
+      const text = getUserFriendlyErrorText(error, '重置评审失败');
+      setErrorText(text);
+      if (typeof setMessage === 'function' && !shouldSuppressWindowClosedServiceError(text)) {
+        setMessage({ type: 'error', text });
+      }
+    } finally {
+      setResettingReview(false);
+    }
+  };
+
   return (
     <>
       <Dialog
         open={open}
         onClose={(event, reason) => {
-          if (loading || saving || reason === 'backdropClick') return;
+          if (loading || saving || resettingReview || reason === 'backdropClick') return;
           onClose?.();
         }}
         fullWidth
         maxWidth="md"
       >
         <DialogTitle>
-          AI评审配置（比赛：{competitionName || '-'}）
+          AI评审（比赛：{competitionName || '-'}）
         </DialogTitle>
         <DialogContent dividers>
           {loading ? (
             <Stack alignItems="center" spacing={1.2} sx={{ py: 5 }}>
               <CircularProgress size={24} />
-              <Typography variant="body2" color="text.secondary">加载 AI 评审配置中...</Typography>
+              <Typography variant="body2" color="text.secondary">加载 AI 评审信息中...</Typography>
             </Stack>
           ) : (
             <Stack spacing={2}>
-              <Alert severity="info">
-                “预览评审”和“开始评审”都会基于已保存配置执行；修改参数后请先保存。
-              </Alert>
-              {canEdit && !locked && !settingsEditing && (
-                <Alert severity="info">
-                  当前为已保存配置。点击“修改配置”后才可编辑，修改完成后请再次保存。
+              {scoringDisabled && (
+                <Alert severity="warning">
+                  未启用AI评审，请前往“评分设置”页面启用。
                 </Alert>
               )}
-              {!reviewWindowOpen && (
+              <Box
+                sx={scoringDisabled ? {
+                  opacity: 0.5,
+                  filter: 'grayscale(1)',
+                  pointerEvents: 'none',
+                } : undefined}
+              >
+                <Stack spacing={2}>
+              {displayReviewRunState !== 'completed' && reviewControlsLocked && (
                 <Alert severity="warning">
-                  仅在评审期内可以开始评审。
+                  已开始正式评审，当前不可再修改配置；仍可运行预览评审。
                 </Alert>
               )}
-              {locked && (
+              {displayReviewRunState !== 'completed' && !reviewWindowOpen && (
                 <Alert severity="warning">
-                  当前 AI 评审配置已锁定，仅支持查看。
+                  仅在评审期内可以开始或继续评审。
                 </Alert>
               )}
-              {errorText && !hideWindowClosedServiceError && <Alert severity="error">{errorText}</Alert>}
-              {hasUnsavedChanges && (
+              {displayReviewRunState !== 'completed' && locked && (
                 <Alert severity="warning">
-                  当前参数有未保存修改，请先点击“保存配置”后再执行“预览评审”或“开始评审”。
+                  当前 AI 评审已锁定，仅支持查看。
+                </Alert>
+              )}
+              {displayReviewRunState !== 'completed' && errorText && !hideWindowClosedServiceError && <Alert severity="error">{errorText}</Alert>}
+              {displayReviewRunState !== 'completed' && hasUnsavedChanges && (
+                <Alert severity="warning">
+                  当前参数有未保存修改，请先点击“保存配置”后再执行“预览评审”或“开始/进行评审”。
                 </Alert>
               )}
 
@@ -1208,23 +1771,31 @@ export default function AIReviewSettingsDialog({
                 <Typography variant="subtitle2">AI 评审状态</Typography>
                 <Chip
                   size="small"
-                  color={enabled ? 'success' : 'default'}
-                  label={enabled ? '已启用' : '已停用'}
+                  color={reviewRunStateChipMeta.color}
+                  icon={reviewRunStateChipMeta.icon}
+                  label={reviewRunStateChipMeta.label}
                 />
               </Stack>
-              {!enabled && (
+              {displayReviewRunState === 'running' && (
+                <Alert severity="success">
+                  当前 AI 评审正在运行。点击“暂停评审”后，会立即暂停所有评审任务（包括正在进行中的评审）；被中断的任务记为失败，不计入成功次数。
+                </Alert>
+              )}
+              {displayReviewRunState !== 'completed' && !enabled && (
                 <Alert severity="warning">
-                  AI 评审已停用，开始评审不可用。
+                  AI 评审已停用，开始/继续评审不可用。
                 </Alert>
               )}
               <NumberField
                 label="同一个模型评审次数"
                 value={runsPerModel}
                 onChange={setRunsPerModel}
-                min={1}
+                min={minRequiredRunsPerModel}
                 max={10}
                 disabled={!canEdit || locked || saving || !settingsEditing}
-                helperText="这里填成功评审次数；后端会自动预留更多尝试次数，尽量把每个模型跑满。"
+                helperText={strictMinimumsEnabled
+                  ? `${strictMinimumRuleName}下，目标成功次数至少 ${minRequiredRunsPerModel} 次；后端会自动预留更多尝试次数。`
+                  : '这里填每个模型的目标成功次数；后端会自动预留更多尝试次数。'}
               />
               <NumberField
                 label="评审文本上限字符数"
@@ -1378,6 +1949,11 @@ export default function AIReviewSettingsDialog({
                     <Chip size="small" color="primary" label="默认模型" />
                   )}
                 </Stack>
+                <Typography variant="caption" color="text.secondary">
+                  {strictMinimumsEnabled
+                    ? `${strictMinimumRuleName}下，至少选择 ${minRequiredModelCount} 个模型，少于该数量将无法保存或启动评审。`
+                    : `当前规则至少选择 ${minRequiredModelCount} 个模型。`}
+                </Typography>
                 <Stack spacing={1}>
                   {modelCatalog.map((item) => {
                     const checked = selectedModelKeySet.has(item.key);
@@ -1413,52 +1989,84 @@ export default function AIReviewSettingsDialog({
                   })}
                 </Stack>
               </Stack>
-
+                </Stack>
+              </Box>
             </Stack>
           )}
         </DialogContent>
         <DialogActions>
           <Button
-            onClick={onClose}
-            disabled={loading || saving}
+            variant="outlined"
+            color="error"
+            onClick={openResetConfirmDialog}
+            disabled={loading || saving || resettingReview || scoringDisabled || !competitionId}
           >
-            关闭
+            {resettingReview ? '重置中...' : '重置评审'}
           </Button>
           <Button
             variant="outlined"
             color="info"
             onClick={() => {
+              if (scoringDisabled) {
+                setMessage?.({ type: 'warning', text: '未启用AI评审，请前往“评分设置”页面启用。' });
+                return;
+              }
               if (settingsEditing || hasUnsavedChanges) {
                 setMessage?.({ type: 'warning', text: '请先保存参数后再运行预览' });
                 return;
               }
               setPreviewOpen(true);
             }}
-            disabled={loading || saving || modelCatalog.length === 0 || rubricCatalog.length === 0}
+            disabled={loading || saving || resettingReview || scoringDisabled || modelCatalog.length === 0 || rubricCatalog.length === 0}
           >
             预览评审
           </Button>
           <Button
             variant="outlined"
-            color="success"
-            onClick={startReview}
-            disabled={loading || saving || locked || !canEdit || !enabled || !reviewWindowOpen}
+            color="secondary"
+            onClick={() => onOpenProgress?.(competition)}
+            disabled={loading || saving || resettingReview || scoringDisabled || !competitionId || normalizedReviewRunState === 'not_started'}
           >
-            {saving ? '处理中...' : '开始评审'}
+            评审进度
+          </Button>
+          <Button
+            variant="outlined"
+            color="success"
+            onClick={handleRunControl}
+            disabled={
+              loading
+              || saving
+              || resettingReview
+              || locked
+              || !canEdit
+              || !enabled
+              || scoringDisabled
+              || displayReviewRunState === 'completed'
+              || ((runControlMode === 'start' || runControlMode === 'resume') && !reviewWindowOpen)
+            }
+          >
+            {saving ? '处理中...' : runControlButtonLabel}
           </Button>
           <Button
             variant="contained"
             onClick={() => {
-              if (!canEdit || locked || loading || saving) return;
+              if (!canEdit || locked || loading || saving || resettingReview) return;
+              if (reviewControlsLocked) return;
               if (!settingsEditing) {
                 setSettingsEditing(true);
                 return;
               }
               saveSettings();
             }}
-            disabled={loading || saving || locked || !canEdit}
+            disabled={loading || saving || resettingReview || locked || !canEdit || scoringDisabled || reviewControlsLocked}
           >
             {settingsEditing ? (saving ? '保存中...' : '保存配置') : '修改配置'}
+          </Button>
+          <Button
+            onClick={onClose}
+            disabled={loading || saving || resettingReview}
+          >
+            关闭
           </Button>
         </DialogActions>
       </Dialog>
@@ -1466,7 +2074,7 @@ export default function AIReviewSettingsDialog({
       <Dialog
         open={startConfirmOpen}
         onClose={(_, reason) => {
-          if (saving || reason === 'backdropClick') return;
+          if (saving || resettingReview || reason === 'backdropClick') return;
           setStartConfirmOpen(false);
         }}
         fullWidth
@@ -1509,7 +2117,7 @@ export default function AIReviewSettingsDialog({
               setStartConfirmOpen(false);
               setStartConfirmSnapshot(null);
             }}
-            disabled={saving}
+            disabled={saving || resettingReview}
           >
             取消
           </Button>
@@ -1521,9 +2129,66 @@ export default function AIReviewSettingsDialog({
               setStartConfirmSnapshot(null);
               confirmStartReview();
             }}
-            disabled={saving}
+            disabled={saving || resettingReview}
           >
             {saving ? '处理中...' : '确认并开始'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={resetConfirmOpen}
+        onClose={(_, reason) => {
+          if (resettingReview || reason === 'backdropClick') return;
+          setResetConfirmOpen(false);
+          setResetConfirmPassword('');
+        }}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>确认重置评审</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.2}>
+            <Alert severity="warning">
+              该操作会把当前比赛 AI 评审重置为未开始状态，且不可撤销。
+            </Alert>
+            <Typography variant="body2">
+              影响范围：
+            </Typography>
+            <Typography variant="body2" color="text.secondary">1. 清空当前比赛的 AI 评审任务队列。</Typography>
+            <Typography variant="body2" color="text.secondary">2. 清空当前比赛已有 AI 评审运行记录与结果。</Typography>
+            <Typography variant="body2" color="text.secondary">3. AI 评审运行状态恢复为“未开始”，需重新点击“开始评审”。</Typography>
+            <Typography variant="body2" color="text.secondary">4. 不影响人工评审、作品内容、评分设置等其它模块。</Typography>
+            <Typography variant="body2" color="text.secondary">
+              比赛：{competitionName || '-'}
+            </Typography>
+            <TextField
+              label="账号密码（二次确认）"
+              type="password"
+              value={resetConfirmPassword}
+              onChange={(event) => setResetConfirmPassword(event.target.value)}
+              autoComplete="current-password"
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setResetConfirmOpen(false);
+              setResetConfirmPassword('');
+            }}
+            disabled={resettingReview}
+          >
+            取消
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={resetAIReviewToNotStarted}
+            disabled={resettingReview || loading || saving || !competitionId || !String(resetConfirmPassword || '').trim()}
+          >
+            {resettingReview ? '重置中...' : '确认重置'}
           </Button>
         </DialogActions>
       </Dialog>

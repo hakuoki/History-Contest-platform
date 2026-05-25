@@ -31,6 +31,13 @@ import {
   submitAssignedSubmissionReview,
 } from '../../../api';
 import { getUserFriendlyErrorText } from '../../../utils/errorText';
+import {
+  DEFAULT_SCORING_MODE_KEY,
+  getExpectedDimensionCodesForScoringRubric,
+  getScoringModeProfile,
+  isQuantitativeScoringMode,
+  normalizeScoringModeKey,
+} from '../rules/scoringModeProfiles';
 
 const PAGE_SIZE = 200;
 const PREVIEW_MIN_HEIGHT_DESKTOP = 'max(1020px, calc(100vh - 150px))';
@@ -122,14 +129,13 @@ export function buildEmptyQuantitativeItemScoreMap(rubricDimensions = []) {
 }
 
 export function findFirstMissingReviewField({
-  scoringMode = 'single_score',
+  scoringMode = DEFAULT_SCORING_MODE_KEY,
   rubricDimensions = [],
   quantitativeItemScores = {},
   scoreInput = '',
   fatalHits = [],
 } = {}) {
-  const mode = String(scoringMode || '').trim().toLowerCase() || 'single_score';
-  if (mode === 'history_paper_quantitative') {
+  if (isQuantitativeScoringMode(scoringMode)) {
     const hasFatalHit = Array.isArray(fatalHits)
       && fatalHits.some((item) => String(item || '').trim());
     for (const item of listQuantitativeReviewItems(rubricDimensions)) {
@@ -725,9 +731,14 @@ export default function JudgeReviewPage({
     [selectedRow?.work_description, reviewContext?.submission_work_description]
   );
   const selectedReviewed = Boolean(selectedRow?.reviewed || reviewContext?.review);
-  const scoringMode = String(reviewContext?.competition_scoring_settings?.settings?.mode_key || 'single_score')
-    .trim()
-    .toLowerCase() || 'single_score';
+  const scoringMode = normalizeScoringModeKey(
+    reviewContext?.competition_scoring_settings?.settings?.mode_key
+  );
+  const scoringModeProfile = useMemo(
+    () => getScoringModeProfile(scoringMode),
+    [scoringMode]
+  );
+  const isQuantitativeMode = Boolean(scoringModeProfile.quantitative);
   const competitionDisplayName = useMemo(() => {
     const name = String(competition?.name || '').trim();
     if (name) return name;
@@ -832,13 +843,10 @@ export default function JudgeReviewPage({
     ),
     [rubricDimensions]
   );
-  const expectedDimensionCodes = useMemo(() => {
-    const rubricKey = String(rubricConfig?.rubric_key || '').trim().toLowerCase();
-    if (rubricKey === 'history_paper_quantitative') {
-      return ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
-    }
-    return rubricDimensionCodes;
-  }, [rubricConfig?.rubric_key, rubricDimensionCodes]);
+  const expectedDimensionCodes = useMemo(
+    () => getExpectedDimensionCodesForScoringRubric(rubricConfig?.rubric_key, rubricDimensionCodes),
+    [rubricConfig?.rubric_key, rubricDimensionCodes]
+  );
   const missingExpectedDimensionCodes = useMemo(
     () => expectedDimensionCodes.filter((code) => !rubricDimensionCodes.includes(code)),
     [expectedDimensionCodes, rubricDimensionCodes]
@@ -1045,17 +1053,18 @@ export default function JudgeReviewPage({
         );
 
         try {
-          const contextMode = String(
-            contextData?.competition_scoring_settings?.settings?.mode_key || 'single_score'
-          ).trim().toLowerCase();
+          const contextMode = normalizeScoringModeKey(
+            contextData?.competition_scoring_settings?.settings?.mode_key
+          );
           const draftRaw = window.localStorage.getItem(
             `contest_judge_review_draft_${normalizedCompetitionId}_${selectedSubmissionId}`
           );
           if (draftRaw) {
             const draft = JSON.parse(draftRaw);
             if (draft && typeof draft === 'object') {
-              const draftMode = String(draft.scoring_mode || '').trim().toLowerCase();
-              if (!draftMode || draftMode === contextMode) {
+              const rawDraftMode = String(draft.scoring_mode || '').trim();
+              const draftMode = normalizeScoringModeKey(rawDraftMode);
+              if (!rawDraftMode || draftMode === contextMode) {
                 setScoreInput(String(draft.score_input ?? review?.score ?? ''));
                 setCommentInput(String(draft.comment_input ?? review?.comment ?? ''));
                 setQuantitativeItemScores(
@@ -1366,7 +1375,6 @@ export default function JudgeReviewPage({
   const saveDraft = async () => {
     if (!normalizedCompetitionId || !selectedSubmissionId) return;
     if (!selectedRow) return;
-    const isQuantitativeMode = scoringMode === 'history_paper_quantitative';
     if (isQuantitativeMode) {
       for (const item of quantitativeReviewItems) {
         const code = String(item?.code || '').trim().toUpperCase();
@@ -1429,7 +1437,6 @@ export default function JudgeReviewPage({
       return;
     }
 
-    const isQuantitativeMode = scoringMode === 'history_paper_quantitative';
     let payload = {
       comment: String(commentInput || '').trim(),
     };
@@ -1611,9 +1618,9 @@ export default function JudgeReviewPage({
             />
             <Chip
               size="small"
-              color={scoringMode === 'history_paper_quantitative' ? 'warning' : 'default'}
+              color={scoringModeProfile.review_mode_chip_color}
               variant="outlined"
-              label={scoringMode === 'history_paper_quantitative' ? '维度评分模式' : '单分模式'}
+              label={scoringModeProfile.review_mode_chip_label}
             />
           </Stack>
         </Box>
@@ -2138,7 +2145,7 @@ export default function JudgeReviewPage({
                   }}
                 >
                   <Typography variant="subtitle2" sx={{ color: '#4e2f7f', fontWeight: 700 }}>
-                    {scoringMode === 'history_paper_quantitative' ? '维度评分表' : '评分与评语'}
+                    {scoringModeProfile.review_panel_title}
                   </Typography>
                 </Box>
 
@@ -2178,7 +2185,7 @@ export default function JudgeReviewPage({
                     sx={{
                       pr: 0.2,
                       pb: 0.2,
-                      pt: scoringMode === 'history_paper_quantitative' ? 0.2 : 1.4,
+                      pt: scoringModeProfile.review_stack_top_padding,
                     }}
                   >
                     {!reviewPermission.canScore && (
@@ -2195,7 +2202,7 @@ export default function JudgeReviewPage({
                         已评审：分数 {selectedReviewedScore ?? '-'}{selectedReviewedGrade ? `，等级 ${selectedReviewedGrade}` : ''}
                       </Alert>
                     )}
-                    {scoringMode === 'history_paper_quantitative' ? (
+                    {isQuantitativeMode ? (
                       <>
                         {!!rubricFatalCriteria.length && (
                           <Paper variant="outlined" sx={{ p: 1.2, borderColor: '#f0cfcc', background: '#fff9f8' }}>
@@ -2388,8 +2395,8 @@ export default function JudgeReviewPage({
                     onChange={(e) => setCommentInput(e.target.value)}
                     disabled={!canEditReviewFields}
                     multiline
-                    minRows={scoringMode === 'history_paper_quantitative' ? 4 : 6}
-                    maxRows={scoringMode === 'history_paper_quantitative' ? 8 : 10}
+                    minRows={scoringModeProfile.comment_min_rows}
+                    maxRows={scoringModeProfile.comment_max_rows}
                     fullWidth
                     helperText="最多 2000 字"
                     sx={{
@@ -2401,7 +2408,7 @@ export default function JudgeReviewPage({
                   />
 
                   <Stack spacing={0.45}>
-                    {scoringMode === 'history_paper_quantitative' ? (
+                    {isQuantitativeMode ? (
                       <>
                         <Typography variant="body2">
                           当前总分：{quantitativeHasInput ? `${quantitativeDisplayTotalScore} / 100` : '未评分'}

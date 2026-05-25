@@ -45,6 +45,7 @@ import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded';
 import dayjs from 'dayjs';
 import AIReviewSettingsDialog from '../components/AIReviewSettingsDialog';
+import AIReviewProgressDialog from '../components/AIReviewProgressDialog';
 import {
   addCompetitionJudge,
   createCompetition,
@@ -53,11 +54,18 @@ import {
   decideUserSyncReview,
   deleteCompetition,
   getCompetitionById,
+  getCompetitionResultPublicStatus,
+  getCompetitionResultSettings,
+  getCompetitionParticipantResultDetail,
+  getCompetitionPublicRanking,
+  getCompetitionAIReviewSettings,
   getCompetitionScoringSettings,
   getCompetitionTrainingManualMeta,
   getCreatePermission,
+  getMyCompetitionResultDetail,
   getMySubmissionAttachmentBlob,
   listMyJudgeCompetitionsPaged,
+  listCompetitionResultsPaged,
   getMySubmissionDetail,
   getUserSyncReviewPermission,
   listCompetitionParticipantsStatusPaged,
@@ -74,14 +82,30 @@ import {
   submitSubmission as submitSubmissionApi,
   unregisterParticipant,
   unlockCompetitionScoringSettings,
+  updateCompetitionResultPublishSettings,
   updateCompetitionJudgeStatus,
   updateCompetitionScoringSettings,
   updateCurrentUserProfile,
   updateCompetition,
+  exportCompetitionResultsBlob,
   uploadSubmissionAttachment,
 } from '../../../api';
 import { contestRuntimeConfig } from '../../../config/contestRuntimeConfig';
 import { getUserFriendlyErrorText } from '../../../utils/errorText';
+import {
+  getAIFatalCriteriaLabel,
+  mapAIDimensionScoresForDisplay,
+  normalizeAIRubricKey,
+  shouldUseAIFatalHitSection,
+} from '../rules/aiRubricProfiles';
+import {
+  DEFAULT_SCORING_MODE_KEY,
+  DEFAULT_SCORING_RUBRIC_KEY,
+  getDefaultRubricKeyForScoringMode,
+  normalizeScoringModeKey,
+  requiresScoringRubricVersion,
+  SCORING_MODE_OPTIONS,
+} from '../rules/scoringModeProfiles';
 
 const CONTEST_API_PREFIX = (contestRuntimeConfig.api.contestApiPrefix || '/contest/api').replace(/\/+$/, '');
 const SUBMISSION_ATTACHMENT_ENDPOINT = `${CONTEST_API_PREFIX}/submissions/my/attachment`;
@@ -106,6 +130,8 @@ const SUBMISSION_STATUS_MIN_INTERVAL_MS = 4000;
 const SUBMISSION_STATUS_FORCE_MIN_INTERVAL_MS = 1200;
 const PARTICIPANTS_PAGE_SIZE = 20;
 const JUDGE_PAGE_SIZE = 10;
+const RESULT_PAGE_SIZE = 20;
+const RESULT_PREVIEW_PAGE_SIZE = 200;
 const EMPTY_SUBMISSION_FORM = {
   title: '',
   work_description: '无',
@@ -145,6 +171,13 @@ const EMPTY_FORM = {
   show_ai_analysis: 1,
   generate_certificate: 1,
 };
+
+const COMPETITION_VISIBILITY_DEFAULTS = Object.freeze({
+  ranking_visibility: 'all',
+  show_judge_comment: 1,
+  show_ai_analysis: 1,
+  generate_certificate: 1,
+});
 
 const EMPTY_PROFILE_FORM = {
   study_status: 'in_school',
@@ -189,17 +222,19 @@ const USER_SYNC_REVIEW_CONFIRM_TEXT = {
   approve: '确认同步',
   reject: '确认拒绝',
 };
-const SCORING_MODE_OPTIONS = [
-  { value: 'single_score', label: '单分模式（总分+评语）' },
-  { value: 'history_paper_quantitative', label: '历史论文量化评分（7维度）' },
-];
-const DEFAULT_RUBRIC_KEY = 'history_paper_quantitative';
 const ATTACHMENT_FORMAT_LABELS = {
   pdf: 'PDF',
   docx: 'DOCX',
   xlsx: 'XLSX',
 };
 const DEFAULT_SCORING_REVIEW_FORMATS = ['pdf'];
+const RESULT_SORT_OPTIONS = [
+  { value: 'final_score', label: '最终分' },
+  { value: 'updated_at', label: '最近更新时间' },
+  { value: 'manual_score', label: '人工分' },
+  { value: 'ai_score', label: 'AI分' },
+  { value: 'name', label: '选手名' },
+];
 const USER_SYNC_CONFLICT_HINT =
   '“冲突”表示系统在同步到 users 时，发现邮箱/手机号无法唯一对应同一账号（如分别命中不同用户），为避免错绑账号而拒绝自动同步。';
 const CONTEST_THEME = {
@@ -232,6 +267,52 @@ const CONTEST_THEME = {
   sortSecondary: '#7150a3',
   datePlaceholderColor: 'rgba(72,41,120,0.45)',
   datePlaceholderShadow: '0 1px 2px rgba(72,41,120,0.18)',
+};
+const RESULT_DETAIL_DIALOG_PAPER_SX = {
+  width: 'min(1460px, 97vw)',
+  minHeight: '86vh',
+  maxHeight: '94vh',
+  borderRadius: { xs: 2, md: 2.5 },
+};
+const RESULT_DETAIL_DIALOG_TITLE_SX = {
+  fontSize: { xs: '1.62rem', md: '1.9rem' },
+  fontWeight: 700,
+  letterSpacing: '0.01em',
+};
+const RESULT_DETAIL_DIALOG_CONTENT_SX = {
+  px: { xs: 2.6, md: 3.8 },
+  py: { xs: 2.4, md: 2.8 },
+};
+const RESULT_DETAIL_MAIN_VALUE_SX = {
+  fontWeight: 500,
+  fontSize: { xs: '1.16rem', md: '1.28rem' },
+  lineHeight: 1.58,
+};
+const RESULT_DETAIL_SUB_VALUE_SX = {
+  fontWeight: 500,
+  fontSize: { xs: '1.08rem', md: '1.18rem' },
+  lineHeight: 1.58,
+};
+const RESULT_DETAIL_SECTION_TITLE_SX = {
+  fontSize: { xs: '1.34rem', md: '1.56rem' },
+  fontWeight: 700,
+  letterSpacing: '0.01em',
+};
+const PUBLIC_RESULT_DIALOG_PAPER_SX = {
+  width: 'min(1500px, 97vw)',
+  minHeight: '72vh',
+  maxHeight: '90vh',
+  borderRadius: { xs: 2, md: 2.5 },
+};
+const PUBLIC_RESULT_DIALOG_TITLE_SX = {
+  fontSize: { xs: '1.58rem', md: '1.86rem' },
+  fontWeight: 700,
+  letterSpacing: '0.01em',
+};
+const PUBLIC_RESULT_TABLE_CELL_SX = {
+  fontSize: { xs: '1.08rem', md: '1.16rem' },
+  lineHeight: 1.6,
+  py: { xs: 1.05, md: 1.2 },
 };
 
 function toFormatList(value) {
@@ -350,6 +431,19 @@ function formatTimeValue(raw, pendingText = '待定') {
   if (raw === null || raw === undefined || raw === '') return pendingText;
   const d = dayjs(raw);
   return d.isValid() ? d.format('YYYY-MM-DD HH:mm') : '-';
+}
+
+function normalizeReviewCommentText(raw) {
+  const text = String(raw || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
+  if (!text) return '';
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.replace(/\n+/g, ' ').replace(/[ \t]{2,}/g, ' ').trim())
+    .filter(Boolean);
+  return paragraphs.join('\n\n');
 }
 
 function statusOf(item) {
@@ -478,6 +572,14 @@ function toBoolFlag(value, fallback = false) {
   if (['1', 'true', 'yes', 'on'].includes(text)) return true;
   if (['0', 'false', 'no', 'off'].includes(text)) return false;
   return Boolean(fallback);
+}
+
+function normalizeReviewRunState(value) {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'running' || token === 'paused' || token === 'not_started') return token;
+  if (token === 'start' || token === 'resume') return 'running';
+  if (token === 'pause') return 'paused';
+  return 'not_started';
 }
 
 function normalizeAttachmentMeta(raw) {
@@ -655,6 +757,225 @@ function judgeStatusLabel(status) {
   return normalized === 'disabled' ? '停用' : '启用';
 }
 
+function resultSubmissionStatusLabel(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return normalized === 'submitted' ? '已提交' : '未提交';
+}
+
+function resultManualStatusLabel(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'completed') return '已完成';
+  if (normalized === 'unreviewed') return '未评审';
+  if (normalized === 'disabled') return '未启用';
+  if (normalized === 'not_submitted') return '未提交';
+  return '待评分';
+}
+
+function resultAIStatusLabel(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'completed') return '已完成';
+  if (normalized === 'unreviewed') return '未评审';
+  if (normalized === 'running') return '评审中';
+  if (normalized === 'failed') return '失败';
+  if (normalized === 'disabled') return '未启用';
+  if (normalized === 'not_submitted') return '未提交';
+  return '待评审';
+}
+
+function resultManualScoreDisplay(row) {
+  const score = Number(row?.manual_score ?? 0);
+  return Number.isFinite(score) ? score : 0;
+}
+
+function formatOneDecimalScore(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  return num.toFixed(1);
+}
+
+function normalizeAIScoredRuns(rawRuns) {
+  if (!Array.isArray(rawRuns)) return [];
+  const normalized = rawRuns
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const status = String(item?.status || '').trim().toLowerCase() || 'succeeded';
+      if (status !== 'succeeded') return null;
+      const runIndex = Number(item?.run_index);
+      return {
+        ...item,
+        model_key: String(item?.model_key || '').trim(),
+        model_name: String(item?.model_name || '').trim(),
+        run_index: Number.isFinite(runIndex) ? runIndex : 0,
+        status,
+        parsed_json: (item?.parsed_json && typeof item.parsed_json === 'object') ? item.parsed_json : null,
+      };
+    })
+    .filter(Boolean);
+  normalized.sort((a, b) => {
+    const modelA = String(a?.model_key || '');
+    const modelB = String(b?.model_key || '');
+    if (modelA !== modelB) return modelA.localeCompare(modelB);
+    return Number(a?.run_index || 0) - Number(b?.run_index || 0);
+  });
+  return normalized;
+}
+
+function buildFallbackAIScoredRunsFromParsedJson(parsedJson) {
+  const payload = (parsedJson && typeof parsedJson === 'object') ? parsedJson : null;
+  if (!payload) return [];
+  const models = Array.isArray(payload?.models) ? payload.models : [];
+  const trimmedModelKeys = Array.isArray(payload?.trimmed_model_keys)
+    ? payload.trimmed_model_keys.map((key) => String(key || '').trim()).filter(Boolean)
+    : [];
+  const selectedModelKeySet = new Set(trimmedModelKeys);
+  const result = [];
+  models.forEach((modelSummary) => {
+    if (!modelSummary || typeof modelSummary !== 'object') return;
+    if (String(modelSummary?.status || '').trim().toLowerCase() !== 'succeeded') return;
+    const modelKey = String(modelSummary?.model_key || '').trim();
+    const modelName = String(modelSummary?.model_name || '').trim();
+    if (selectedModelKeySet.size > 0 && !selectedModelKeySet.has(modelKey)) return;
+
+    const succeededRuns = (Array.isArray(modelSummary?.runs) ? modelSummary.runs : [])
+      .filter((run) => run && typeof run === 'object' && String(run?.status || '').trim().toLowerCase() === 'succeeded')
+      .map((run) => ({
+        ...run,
+        model_key: String(run?.model_key || modelKey).trim(),
+        model_name: String(run?.model_name || modelName).trim(),
+        parsed_json: (run?.parsed_json && typeof run.parsed_json === 'object') ? run.parsed_json : null,
+      }));
+
+    if (succeededRuns.length > 0) {
+      result.push(...succeededRuns);
+      return;
+    }
+
+    const representativeRun = modelSummary?.representative_run;
+    if (representativeRun && typeof representativeRun === 'object') {
+      const representativeStatus = String(representativeRun?.status || '').trim().toLowerCase();
+      if (!representativeStatus || representativeStatus === 'succeeded') {
+        result.push({
+          ...representativeRun,
+          model_key: String(representativeRun?.model_key || modelKey).trim(),
+          model_name: String(representativeRun?.model_name || modelName).trim(),
+          parsed_json: (
+            representativeRun?.parsed_json && typeof representativeRun.parsed_json === 'object'
+          ) ? representativeRun.parsed_json : null,
+        });
+      }
+    }
+  });
+  return normalizeAIScoredRuns(result);
+}
+
+function resolveAIScoredRunsForDetail(aiFinal) {
+  const scoredRuns = normalizeAIScoredRuns(aiFinal?.scored_runs);
+  if (scoredRuns.length > 0) return scoredRuns;
+  return buildFallbackAIScoredRunsFromParsedJson(aiFinal?.parsed_json);
+}
+
+const DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG = Object.freeze({
+  enabled: false,
+  section_title: '参与算分详情',
+  empty_text: '暂无可展示的参与算分评审明细',
+  meta_field_order: Object.freeze(['run_title', 'score', 'reviewed_at']),
+  show_raw_total_score: false,
+  show_dimension_scores: true,
+  run_title_label: '评审轮次',
+  run_title_format: '{model} · 第{run}次',
+  score_label: 'AI分',
+  raw_total_score_label: '原始总分',
+  reviewed_at_label: '评审时间',
+  dimension_scores_label: '维度分数',
+  comment_label: '评语',
+});
+
+const ALLOWED_AI_SCORED_RUN_META_FIELD_KEYS = new Set(['run_title', 'score', 'reviewed_at', 'raw_total_score']);
+
+function normalizeAIScoredRunsDisplayConfig(rawConfig) {
+  const input = (rawConfig && typeof rawConfig === 'object') ? rawConfig : {};
+  const normalizedOrder = [];
+  if (Array.isArray(input?.meta_field_order)) {
+    input.meta_field_order.forEach((item) => {
+      const token = String(item || '').trim();
+      if (!ALLOWED_AI_SCORED_RUN_META_FIELD_KEYS.has(token)) return;
+      if (normalizedOrder.includes(token)) return;
+      normalizedOrder.push(token);
+    });
+  }
+  const resolvedOrder = normalizedOrder.length
+    ? normalizedOrder
+    : [...DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.meta_field_order];
+
+  return {
+    enabled: toBoolFlag(input?.enabled, DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.enabled),
+    section_title: String(input?.section_title || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.section_title,
+    empty_text: String(input?.empty_text || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.empty_text,
+    meta_field_order: resolvedOrder,
+    show_raw_total_score: toBoolFlag(input?.show_raw_total_score, DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.show_raw_total_score),
+    show_dimension_scores: toBoolFlag(input?.show_dimension_scores, DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.show_dimension_scores),
+    run_title_label: String(input?.run_title_label || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.run_title_label,
+    run_title_format: String(input?.run_title_format || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.run_title_format,
+    score_label: String(input?.score_label || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.score_label,
+    raw_total_score_label: String(input?.raw_total_score_label || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.raw_total_score_label,
+    reviewed_at_label: String(input?.reviewed_at_label || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.reviewed_at_label,
+    dimension_scores_label: String(input?.dimension_scores_label || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.dimension_scores_label,
+    comment_label: String(input?.comment_label || '').trim() || DEFAULT_AI_SCORED_RUNS_DISPLAY_CONFIG.comment_label,
+  };
+}
+
+function formatAIScoredRunTitle(modelTitle, runIndex, templateText) {
+  const template = String(templateText || '').trim() || '{model} · 第{run}次';
+  const runToken = Number.isFinite(Number(runIndex)) && Number(runIndex) > 0 ? String(Number(runIndex)) : '-';
+  return template
+    .replaceAll('{model}', String(modelTitle || '-'))
+    .replaceAll('{run}', runToken);
+}
+
+function resultAIScoreDisplay(row) {
+  const score = Number(row?.ai_score ?? 0);
+  return Number.isFinite(score) ? score : 0;
+}
+
+function maskEmailForPublicRanking(email) {
+  const text = String(email || '').trim();
+  if (!text.includes('@')) return '';
+  const [localPart, domainPart] = text.split('@', 2);
+  if (!localPart) return `***@${domainPart}`;
+  if (localPart.length <= 1) return `${localPart}***@${domainPart}`;
+  const suffix = localPart.length > 3 ? localPart.slice(-3) : localPart.slice(1);
+  return `${localPart[0]}***${suffix}@${domainPart}`;
+}
+
+function buildPublicRankingPreviewRows(rows = []) {
+  const list = Array.isArray(rows) ? rows : [];
+  const result = [];
+  for (const row of list) {
+    if (!row || row.final_score === null || row.final_score === undefined || row.final_score === '') continue;
+    const rankNum = Number(row?.rank);
+    const scoreNum = Number(row?.final_score);
+    result.push({
+      rank: Number.isFinite(rankNum) && rankNum > 0 ? rankNum : null,
+      name: String(row?.name || '').trim() || '-',
+      email_masked: maskEmailForPublicRanking(row?.email),
+      final_score: Number.isFinite(scoreNum) ? scoreNum : row?.final_score,
+    });
+  }
+  return result.map((item, index) => ({
+    ...item,
+    rank: item.rank || (index + 1),
+  }));
+}
+
+function rankingVisibilityText(value) {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'participants') return '仅参赛者可见';
+  if (token === 'winners') return '仅获奖者可见';
+  if (token === 'none') return '不公开';
+  return '全部用户可见';
+}
+
 function userSyncReviewActionText(action) {
   const normalized = String(action || '').trim().toLowerCase();
   return normalized === 'reject' ? '拒绝' : '通过';
@@ -705,6 +1026,18 @@ async function copyToClipboard(text) {
   const ok = document.execCommand('copy');
   document.body.removeChild(textarea);
   return ok;
+}
+
+function downloadBlobFile(blob, fileName = 'download') {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = String(fileName || 'download').trim() || 'download';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function withTimeout(promise, timeoutMs, timeoutMessage = 'timeout') {
@@ -788,11 +1121,11 @@ function buildPayload(form) {
       max_file_size_mb: maxFileSizeMb,
       max_modifications: Number(form.max_modifications),
       show_ranking: Number(form.show_ranking),
-      ranking_visibility: form.ranking_visibility,
+      ranking_visibility: COMPETITION_VISIBILITY_DEFAULTS.ranking_visibility,
       show_score_detail: Number(form.show_score_detail),
-      show_judge_comment: Number(form.show_judge_comment),
-      show_ai_analysis: Number(form.show_ai_analysis),
-      generate_certificate: Number(form.generate_certificate),
+      show_judge_comment: COMPETITION_VISIBILITY_DEFAULTS.show_judge_comment,
+      show_ai_analysis: COMPETITION_VISIBILITY_DEFAULTS.show_ai_analysis,
+      generate_certificate: COMPETITION_VISIBILITY_DEFAULTS.generate_certificate,
     },
   };
 }
@@ -1424,48 +1757,10 @@ function CompetitionForm({ form, setForm, errors = {}, setErrors }) {
         </Grid2>
         <Grid2 size={3}>
           <FormControl fullWidth>
-            <InputLabel>排名可见范围</InputLabel>
-            <Select label="排名可见范围" value={form.ranking_visibility} onChange={set('ranking_visibility')}>
-              <MenuItem value="all">全部</MenuItem>
-              <MenuItem value="winners">仅获奖者</MenuItem>
-              <MenuItem value="participants">仅参赛者</MenuItem>
-              <MenuItem value="none">不可见</MenuItem>
-            </Select>
-          </FormControl>
-        </Grid2>
-        <Grid2 size={2}>
-          <FormControl fullWidth>
             <InputLabel>评分详情</InputLabel>
             <Select label="评分详情" value={String(form.show_score_detail)} onChange={set('show_score_detail')}>
               <MenuItem value="1">公开</MenuItem>
               <MenuItem value="0">不公开</MenuItem>
-            </Select>
-          </FormControl>
-        </Grid2>
-        <Grid2 size={2}>
-          <FormControl fullWidth>
-            <InputLabel>评委评语</InputLabel>
-            <Select label="评委评语" value={String(form.show_judge_comment)} onChange={set('show_judge_comment')}>
-              <MenuItem value="1">公开</MenuItem>
-              <MenuItem value="0">不公开</MenuItem>
-            </Select>
-          </FormControl>
-        </Grid2>
-        <Grid2 size={2}>
-          <FormControl fullWidth>
-            <InputLabel>AI分析</InputLabel>
-            <Select label="AI分析" value={String(form.show_ai_analysis)} onChange={set('show_ai_analysis')}>
-              <MenuItem value="1">公开</MenuItem>
-              <MenuItem value="0">不公开</MenuItem>
-            </Select>
-          </FormControl>
-        </Grid2>
-        <Grid2 size={2}>
-          <FormControl fullWidth>
-            <InputLabel>电子证书</InputLabel>
-            <Select label="电子证书" value={String(form.generate_certificate)} onChange={set('generate_certificate')}>
-              <MenuItem value="1">生成</MenuItem>
-              <MenuItem value="0">不生成</MenuItem>
             </Select>
           </FormControl>
         </Grid2>
@@ -1474,19 +1769,32 @@ function CompetitionForm({ form, setForm, errors = {}, setErrors }) {
   );
 }
 
-function DetailItem({ label, value }) {
+function DetailItem({
+  label,
+  value,
+  labelVariant = 'caption',
+  valueVariant = 'body2',
+  labelSx = null,
+  valueSx = null,
+}) {
+  const hasValue = !(
+    value === null
+    || value === undefined
+    || (typeof value === 'string' && value.trim() === '')
+  );
   return (
     <Box sx={{ py: 0.8 }}>
-      <Typography variant="caption" color="text.secondary">{label}</Typography>
+      <Typography variant={labelVariant} color="text.secondary" sx={labelSx || undefined}>{label}</Typography>
       <Typography
-        variant="body2"
+        variant={valueVariant}
         sx={{
           fontWeight: 600,
           whiteSpace: 'pre-wrap',
           wordBreak: 'break-word',
+          ...(valueSx || {}),
         }}
       >
-        {value || '-'}
+        {hasValue ? value : '-'}
       </Typography>
     </Box>
   );
@@ -1667,17 +1975,52 @@ function Dashboard({
   const [scoringSaving, setScoringSaving] = useState(false);
   const [scoringUnlocking, setScoringUnlocking] = useState(false);
   const [scoringSettings, setScoringSettings] = useState(null);
-  const [scoringMode, setScoringMode] = useState('single_score');
+  const [scoringMode, setScoringMode] = useState(DEFAULT_SCORING_MODE_KEY);
   const [scoringRubricVersions, setScoringRubricVersions] = useState([]);
   const [scoringRubricVersionKey, setScoringRubricVersionKey] = useState('');
   const [scoringReviewAttachmentFormats, setScoringReviewAttachmentFormats] = useState([...DEFAULT_SCORING_REVIEW_FORMATS]);
   const [scoringManualWeight, setScoringManualWeight] = useState('100');
   const [scoringAIWeight, setScoringAIWeight] = useState('0');
   const [scoringAIReviewEnabled, setScoringAIReviewEnabled] = useState(false);
+  const [scoringAIReviewStarted, setScoringAIReviewStarted] = useState(false);
   const [scoringCanEdit, setScoringCanEdit] = useState(true);
   const [scoringEditing, setScoringEditing] = useState(false);
   const [aiReviewOpen, setAiReviewOpen] = useState(false);
   const [aiReviewTarget, setAiReviewTarget] = useState(null);
+  const [aiReviewProgressOpen, setAiReviewProgressOpen] = useState(false);
+  const [aiReviewProgressTarget, setAiReviewProgressTarget] = useState(null);
+  const [resultAccessStatusMap, setResultAccessStatusMap] = useState({});
+  const [competitionResultOpen, setCompetitionResultOpen] = useState(false);
+  const [competitionResultLoading, setCompetitionResultLoading] = useState(false);
+  const [competitionResultPublishing, setCompetitionResultPublishing] = useState(false);
+  const [competitionResultExporting, setCompetitionResultExporting] = useState(false);
+  const [competitionResultTarget, setCompetitionResultTarget] = useState(null);
+  const [competitionResultRows, setCompetitionResultRows] = useState([]);
+  const [competitionResultPublication, setCompetitionResultPublication] = useState(null);
+  const [competitionResultRankingPublishConfirmOpen, setCompetitionResultRankingPublishConfirmOpen] = useState(false);
+  const [competitionResultRankingPreviewRows, setCompetitionResultRankingPreviewRows] = useState([]);
+  const [competitionResultRankingPreviewLoading, setCompetitionResultRankingPreviewLoading] = useState(false);
+  const [competitionResultRankingPreviewError, setCompetitionResultRankingPreviewError] = useState('');
+  const [competitionResultDetailPublishConfirmOpen, setCompetitionResultDetailPublishConfirmOpen] = useState(false);
+  const [competitionResultKeywordInput, setCompetitionResultKeywordInput] = useState('');
+  const [competitionResultKeyword, setCompetitionResultKeyword] = useState('');
+  const [competitionResultSortBy, setCompetitionResultSortBy] = useState('final_score');
+  const [competitionResultSortOrder, setCompetitionResultSortOrder] = useState('desc');
+  const [competitionResultPage, setCompetitionResultPage] = useState(1);
+  const [competitionResultHasNext, setCompetitionResultHasNext] = useState(false);
+  const [competitionResultTotalPages, setCompetitionResultTotalPages] = useState(1);
+  const [competitionResultDetailOpen, setCompetitionResultDetailOpen] = useState(false);
+  const [competitionResultDetailLoading, setCompetitionResultDetailLoading] = useState(false);
+  const [competitionResultDetailData, setCompetitionResultDetailData] = useState(null);
+  const [publicResultOpen, setPublicResultOpen] = useState(false);
+  const [publicResultLoading, setPublicResultLoading] = useState(false);
+  const [publicResultTarget, setPublicResultTarget] = useState(null);
+  const [publicResultRows, setPublicResultRows] = useState([]);
+  const [publicResultPublication, setPublicResultPublication] = useState(null);
+  const [myScoreOpen, setMyScoreOpen] = useState(false);
+  const [myScoreLoading, setMyScoreLoading] = useState(false);
+  const [myScoreTarget, setMyScoreTarget] = useState(null);
+  const [myScoreDetailData, setMyScoreDetailData] = useState(null);
   const [myInfoOpen, setMyInfoOpen] = useState(false);
   const [myInfoCompetition, setMyInfoCompetition] = useState(null);
   const latestRequestIdsRef = useRef({
@@ -1692,6 +2035,11 @@ function Dashboard({
     participants: '',
     judges: '',
     scoring: '',
+    resultAccess: '',
+    competitionResults: '',
+    rankingPreview: '',
+    publicResults: '',
+    myScore: '',
   });
   const submissionStatusLoadRef = useRef({
     inFlight: false,
@@ -1825,6 +2173,458 @@ function Dashboard({
   const detailPrimaryActionButtonSx = {
     minWidth: 128,
     whiteSpace: 'nowrap',
+  };
+  const renderCompetitionResultDetail = (detail) => {
+    if (!detail) {
+      return <Typography color="text.secondary">暂无成绩详情</Typography>;
+    }
+    const manualReviews = Array.isArray(detail?.manual_reviews) ? detail.manual_reviews : [];
+    const aiFinal = detail?.ai_final_review || null;
+    const aiParsedJson = (aiFinal?.parsed_json && typeof aiFinal.parsed_json === 'object')
+      ? aiFinal.parsed_json
+      : null;
+    const aiRubricKey = normalizeAIRubricKey(aiFinal?.rubric_key || aiParsedJson?.rubric_key || '');
+    const aiDimensionScores = mapAIDimensionScoresForDisplay(aiParsedJson?.dimension_scores, aiRubricKey);
+    const aiScoredRuns = resolveAIScoredRunsForDetail(aiFinal);
+    const aiScoredRunsDisplayConfig = normalizeAIScoredRunsDisplayConfig(aiFinal?.scored_runs_display);
+    const aiScoredRunsEnabled = Boolean(aiScoredRunsDisplayConfig?.enabled);
+    const aiFinalComment = normalizeReviewCommentText(aiFinal?.comment);
+    return (
+      <Stack spacing={2}>
+        <Grid2 container spacing={1.35}>
+          <Grid2 size={{ xs: 12, md: 6 }}>
+            <DetailItem
+              label="排名"
+              value={detail?.rank ?? '-'}
+              labelVariant="body2"
+              valueVariant="body1"
+              valueSx={RESULT_DETAIL_MAIN_VALUE_SX}
+            />
+          </Grid2>
+          <Grid2 size={{ xs: 12, md: 6 }}>
+            <DetailItem
+              label="选手名"
+              value={detail?.name || '-'}
+              labelVariant="body2"
+              valueVariant="body1"
+              valueSx={RESULT_DETAIL_MAIN_VALUE_SX}
+            />
+          </Grid2>
+          <Grid2 size={{ xs: 12, md: 6 }}>
+            <DetailItem
+              label="邮箱"
+              value={detail?.email || '-'}
+              labelVariant="body2"
+              valueVariant="body1"
+              valueSx={RESULT_DETAIL_MAIN_VALUE_SX}
+            />
+          </Grid2>
+          <Grid2 size={{ xs: 12, md: 6 }}>
+            <DetailItem
+              label="手机号"
+              value={detail?.phone || '-'}
+              labelVariant="body2"
+              valueVariant="body1"
+              valueSx={RESULT_DETAIL_MAIN_VALUE_SX}
+            />
+          </Grid2>
+          <Grid2 size={{ xs: 12, md: 6 }}>
+            <DetailItem
+              label="提交状态"
+              value={resultSubmissionStatusLabel(detail?.submission_status)}
+              labelVariant="body2"
+              valueVariant="body1"
+              valueSx={RESULT_DETAIL_MAIN_VALUE_SX}
+            />
+          </Grid2>
+          <Grid2 size={{ xs: 12, md: 6 }}>
+            <DetailItem
+              label="人工状态"
+              value={resultManualStatusLabel(detail?.manual_status)}
+              labelVariant="body2"
+              valueVariant="body1"
+              valueSx={RESULT_DETAIL_MAIN_VALUE_SX}
+            />
+          </Grid2>
+          <Grid2 size={{ xs: 12, md: 6 }}>
+            <DetailItem
+              label="AI状态"
+              value={resultAIStatusLabel(detail?.ai_status)}
+              labelVariant="body2"
+              valueVariant="body1"
+              valueSx={RESULT_DETAIL_MAIN_VALUE_SX}
+            />
+          </Grid2>
+          <Grid2 size={{ xs: 12, md: 6 }}>
+            <DetailItem
+              label="最终分"
+              value={detail?.final_score ?? '-'}
+              labelVariant="body2"
+              valueVariant="body1"
+              valueSx={RESULT_DETAIL_MAIN_VALUE_SX}
+            />
+          </Grid2>
+        </Grid2>
+
+        <Divider />
+        <Typography variant="h6" sx={RESULT_DETAIL_SECTION_TITLE_SX}>人工评审详情</Typography>
+        {!manualReviews.length ? (
+          <Typography variant="body1" color="text.secondary">暂无人工评审数据</Typography>
+        ) : (
+          <Stack spacing={1.2}>
+            {manualReviews.map((item, index) => {
+              const detailJson = (item?.detail_json && typeof item.detail_json === 'object') ? item.detail_json : null;
+              const dimensionTotals = Array.isArray(detailJson?.dimension_totals) ? detailJson.dimension_totals : [];
+              const fatalHits = Array.isArray(detailJson?.fatal_hits)
+                ? detailJson.fatal_hits.map((code) => String(code || '').trim()).filter(Boolean)
+                : [];
+              const modeKey = String(detailJson?.mode_key || '').trim().toLowerCase();
+              const isHistoryQuantFatal = (
+                shouldUseAIFatalHitSection(modeKey)
+                && (Boolean(item?.fatal_flag) || fatalHits.length > 0)
+              );
+              const reviewComment = normalizeReviewCommentText(String(item?.comment || detailJson?.note || ''));
+              return (
+                <Box
+                  key={`manual_review_${index}`}
+                  sx={{
+                    border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                    borderRadius: 2,
+                    p: { xs: 1.4, md: 1.7 },
+                    bgcolor: '#fff',
+                  }}
+                >
+                  <Stack spacing={1.2}>
+                    <Grid2 container spacing={1.2}>
+                      <Grid2 size={{ xs: 12, sm: 6 }}>
+                        <DetailItem
+                          label="人工分"
+                          value={item?.score ?? '-'}
+                          labelVariant="body2"
+                          valueVariant="body1"
+                          valueSx={RESULT_DETAIL_SUB_VALUE_SX}
+                        />
+                      </Grid2>
+                      <Grid2 size={{ xs: 12, sm: 6 }}>
+                        <DetailItem
+                          label="评审时间"
+                          value={formatTimeValue(item?.reviewed_at, '-')}
+                          labelVariant="body2"
+                          valueVariant="body1"
+                          valueSx={RESULT_DETAIL_SUB_VALUE_SX}
+                        />
+                      </Grid2>
+                    </Grid2>
+                    {isHistoryQuantFatal ? (
+                      <Box
+                        sx={{
+                          border: '1px solid #f0cfcc',
+                          borderRadius: 1.5,
+                          p: 1,
+                          bgcolor: '#fff9f8',
+                        }}
+                      >
+                        <Typography variant="body1" sx={{ fontWeight: 600, mb: 0.7, color: '#9b3023', fontSize: { xs: '1.04rem', md: '1.12rem' } }}>
+                          致命否决项
+                        </Typography>
+                        {!!fatalHits.length ? (
+                          <Stack spacing={0.4}>
+                            {fatalHits.map((code, hitIndex) => {
+                              const label = getAIFatalCriteriaLabel(code, modeKey);
+                              return (
+                                <Typography
+                                  key={`manual_fatal_${index}_${code}_${hitIndex}`}
+                                  variant="body1"
+                                  sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: { xs: '1.01rem', md: '1.08rem' }, lineHeight: 1.68 }}
+                                >
+                                  {label ? `${label}（${code}）` : code}
+                                </Typography>
+                              );
+                            })}
+                          </Stack>
+                        ) : (
+                          <Typography variant="body1" color="text.secondary" sx={{ fontSize: { xs: '1.01rem', md: '1.08rem' } }}>已触发致命否决项</Typography>
+                        )}
+                      </Box>
+                    ) : (
+                      <>
+                        {!!dimensionTotals.length && (
+                          <Box
+                            sx={{
+                              border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                              borderRadius: 1.5,
+                              p: 1,
+                              bgcolor: '#faf7ff',
+                            }}
+                          >
+                            <Typography variant="body1" sx={{ fontWeight: 600, mb: 0.7, fontSize: { xs: '1.04rem', md: '1.12rem' } }}>维度分数</Typography>
+                            <Grid2 container spacing={0.8}>
+                              {dimensionTotals.map((dim, dimIndex) => (
+                                <Grid2 key={`manual_dim_${index}_${dim?.code || dimIndex}`} size={{ xs: 12, md: 6 }}>
+                                  <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: { xs: '1.01rem', md: '1.08rem' }, lineHeight: 1.68 }}>
+                                    {`${dim?.name || dim?.code || `维度${dimIndex + 1}`}：${dim?.score ?? '-'} / ${dim?.max_score ?? '-'}`}
+                                  </Typography>
+                                </Grid2>
+                              ))}
+                            </Grid2>
+                          </Box>
+                        )}
+                      </>
+                    )}
+                    <Box
+                      sx={{
+                        border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                        borderRadius: 1.5,
+                        p: 1,
+                        bgcolor: '#faf7ff',
+                        width: '100%',
+                      }}
+                    >
+                      <Typography variant="body1" sx={{ fontWeight: 600, mb: 0.7, fontSize: { xs: '1.04rem', md: '1.12rem' } }}>评语</Typography>
+                      <Typography
+                        variant="body1"
+                        sx={{
+                          display: 'block',
+                          width: '100%',
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                          lineHeight: 1.72,
+                          fontSize: { xs: '1.02rem', md: '1.1rem' },
+                        }}
+                      >
+                        {reviewComment || '-'}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                </Box>
+              );
+            })}
+          </Stack>
+        )}
+
+        <Divider />
+        <Typography variant="h6" sx={RESULT_DETAIL_SECTION_TITLE_SX}>AI评审综合详情</Typography>
+        {!aiFinal ? (
+          <Typography variant="body1" color="text.secondary">暂无AI评审结果</Typography>
+        ) : (
+          <Box
+            sx={{
+              border: `1px solid ${CONTEST_THEME.tableBorder}`,
+              borderRadius: 2,
+              p: { xs: 1.4, md: 1.7 },
+              bgcolor: '#fff',
+            }}
+          >
+            <Stack spacing={1.2}>
+              <Grid2 container spacing={1.2}>
+                <Grid2 size={{ xs: 12, sm: 6 }}>
+                  <DetailItem
+                    label="AI分"
+                    value={formatOneDecimalScore(aiFinal?.score)}
+                    labelVariant="body2"
+                    valueVariant="body1"
+                    valueSx={RESULT_DETAIL_SUB_VALUE_SX}
+                  />
+                </Grid2>
+                <Grid2 size={{ xs: 12, sm: 6 }}>
+                  <DetailItem
+                    label="评审时间"
+                    value={formatTimeValue(aiFinal?.reviewed_at || detail?.updated_at, '-')}
+                    labelVariant="body2"
+                    valueVariant="body1"
+                    valueSx={RESULT_DETAIL_SUB_VALUE_SX}
+                  />
+                </Grid2>
+              </Grid2>
+              <Box
+                sx={{
+                  border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                  borderRadius: 1.5,
+                  p: 1,
+                  bgcolor: '#faf7ff',
+                  width: '100%',
+                }}
+              >
+                <Typography variant="body1" sx={{ fontWeight: 600, mb: 0.7, fontSize: { xs: '1.04rem', md: '1.12rem' } }}>维度分数</Typography>
+                {!aiDimensionScores.length ? (
+                  <Typography variant="body1" color="text.secondary" sx={{ fontSize: { xs: '1.01rem', md: '1.08rem' } }}>暂无维度分数</Typography>
+                ) : (
+                  <Grid2 container spacing={0.8}>
+                    {aiDimensionScores.map((dim, dimIndex) => (
+                      <Grid2 key={`ai_dim_${dim?.code || dimIndex}`} size={{ xs: 12, md: 6 }}>
+                        <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: { xs: '1.01rem', md: '1.08rem' }, lineHeight: 1.68 }}>
+                          {`${dim?.display_name || dim?.name || dim?.code || `维度${dimIndex + 1}`}：${dim?.score ?? '-'} / ${dim?.display_max_score ?? '-'}`}
+                        </Typography>
+                      </Grid2>
+                    ))}
+                  </Grid2>
+                )}
+              </Box>
+              <Box
+                sx={{
+                  border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                  borderRadius: 1.5,
+                  p: 1,
+                  bgcolor: '#faf7ff',
+                  width: '100%',
+                }}
+              >
+                <Typography variant="body1" sx={{ fontWeight: 600, mb: 0.7, fontSize: { xs: '1.04rem', md: '1.12rem' } }}>评语</Typography>
+                <Typography
+                  variant="body1"
+                  sx={{
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    lineHeight: 1.72,
+                    fontSize: { xs: '1.02rem', md: '1.1rem' },
+                  }}
+                >
+                  {aiFinalComment || '-'}
+                </Typography>
+              </Box>
+
+              {aiScoredRunsEnabled && (
+                <Box
+                  sx={{
+                    border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                    borderRadius: 1.5,
+                    p: 1,
+                    bgcolor: '#faf7ff',
+                    width: '100%',
+                  }}
+                >
+                  <Stack spacing={0.8}>
+                    <Typography variant="body1" sx={{ fontWeight: 600, fontSize: { xs: '1.04rem', md: '1.12rem' } }}>
+                      {aiScoredRunsDisplayConfig?.section_title || '参与算分详情'}
+                    </Typography>
+                    {!aiScoredRuns.length ? (
+                      <Typography variant="body1" color="text.secondary" sx={{ fontSize: { xs: '1.01rem', md: '1.08rem' } }}>
+                        {aiScoredRunsDisplayConfig?.empty_text || '暂无可展示的参与算分评审明细'}
+                      </Typography>
+                    ) : (
+                      <Stack spacing={1}>
+                        {aiScoredRuns.map((run, runIndex) => {
+                          const runDimensionScores = mapAIDimensionScoresForDisplay(run?.parsed_json?.dimension_scores, aiRubricKey);
+                          const runComment = normalizeReviewCommentText(run?.comment || run?.parsed_json?.comment || '');
+                          const modelTitle = String(run?.model_name || run?.model_key || '').trim() || `模型${runIndex + 1}`;
+                          const runTitleValue = formatAIScoredRunTitle(
+                            modelTitle,
+                            Number(run?.run_index || 0),
+                            aiScoredRunsDisplayConfig?.run_title_format
+                          );
+                          const scoredRunMetaValueMap = {
+                            run_title: runTitleValue,
+                            score: formatOneDecimalScore(run?.score),
+                            reviewed_at: formatTimeValue(run?.reviewed_at, '-'),
+                            raw_total_score: formatOneDecimalScore(run?.raw_total_score),
+                          };
+                          const scoredRunMetaLabelMap = {
+                            run_title: aiScoredRunsDisplayConfig?.run_title_label || '评审轮次',
+                            score: aiScoredRunsDisplayConfig?.score_label || 'AI分',
+                            reviewed_at: aiScoredRunsDisplayConfig?.reviewed_at_label || '评审时间',
+                            raw_total_score: aiScoredRunsDisplayConfig?.raw_total_score_label || '原始总分',
+                          };
+                          const metaFieldOrder = Array.isArray(aiScoredRunsDisplayConfig?.meta_field_order)
+                            ? aiScoredRunsDisplayConfig.meta_field_order
+                            : [];
+                          const visibleMetaFieldOrder = metaFieldOrder.filter((fieldKey) => {
+                            if (fieldKey === 'raw_total_score') {
+                              return Boolean(aiScoredRunsDisplayConfig?.show_raw_total_score);
+                            }
+                            return true;
+                          });
+                          return (
+                            <Box
+                              key={`ai_scored_run_${modelTitle}_${Number(run?.run_index || 0)}_${runIndex}`}
+                              sx={{
+                                border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                                borderRadius: 1.5,
+                                p: 1,
+                                bgcolor: '#fff',
+                              }}
+                            >
+                              <Stack spacing={0.8}>
+                                <Grid2 container spacing={1}>
+                                  {visibleMetaFieldOrder.map((fieldKey) => (
+                                    <Grid2 key={`ai_scored_run_meta_${runIndex}_${fieldKey}`} size={{ xs: 12, sm: 6 }}>
+                                      <DetailItem
+                                        label={scoredRunMetaLabelMap[fieldKey] || fieldKey}
+                                        value={scoredRunMetaValueMap[fieldKey] ?? '-'}
+                                        labelVariant="body2"
+                                        valueVariant="body1"
+                                        valueSx={RESULT_DETAIL_SUB_VALUE_SX}
+                                      />
+                                    </Grid2>
+                                  ))}
+                                </Grid2>
+
+                                {Boolean(aiScoredRunsDisplayConfig?.show_dimension_scores) && (
+                                  <Box
+                                    sx={{
+                                      border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                                      borderRadius: 1.5,
+                                      p: 1,
+                                      bgcolor: '#faf7ff',
+                                      width: '100%',
+                                    }}
+                                  >
+                                    <Typography variant="body1" sx={{ fontWeight: 600, mb: 0.7, fontSize: { xs: '1.04rem', md: '1.12rem' } }}>
+                                      {aiScoredRunsDisplayConfig?.dimension_scores_label || '维度分数'}
+                                    </Typography>
+                                    {!runDimensionScores.length ? (
+                                      <Typography variant="body1" color="text.secondary" sx={{ fontSize: { xs: '1.01rem', md: '1.08rem' } }}>暂无维度分数</Typography>
+                                    ) : (
+                                      <Grid2 container spacing={0.8}>
+                                        {runDimensionScores.map((dim, dimIndex) => (
+                                          <Grid2 key={`ai_scored_run_dim_${runIndex}_${dim?.code || dimIndex}`} size={{ xs: 12, md: 6 }}>
+                                            <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: { xs: '1.01rem', md: '1.08rem' }, lineHeight: 1.68 }}>
+                                              {`${dim?.display_name || dim?.name || dim?.code || `维度${dimIndex + 1}`}：${dim?.score ?? '-'} / ${dim?.display_max_score ?? '-'}`}
+                                            </Typography>
+                                          </Grid2>
+                                        ))}
+                                      </Grid2>
+                                    )}
+                                  </Box>
+                                )}
+
+                                <Box
+                                  sx={{
+                                    border: `1px solid ${CONTEST_THEME.tableBorder}`,
+                                    borderRadius: 1.5,
+                                    p: 1,
+                                    bgcolor: '#faf7ff',
+                                    width: '100%',
+                                  }}
+                                >
+                                  <Typography variant="body1" sx={{ fontWeight: 600, mb: 0.7, fontSize: { xs: '1.04rem', md: '1.12rem' } }}>
+                                    {aiScoredRunsDisplayConfig?.comment_label || '评语'}
+                                  </Typography>
+                                  <Typography
+                                    variant="body1"
+                                    sx={{
+                                      whiteSpace: 'pre-wrap',
+                                      wordBreak: 'break-word',
+                                      lineHeight: 1.72,
+                                      fontSize: { xs: '1.02rem', md: '1.1rem' },
+                                    }}
+                                  >
+                                    {runComment || '-'}
+                                  </Typography>
+                                </Box>
+                              </Stack>
+                            </Box>
+                          );
+                        })}
+                      </Stack>
+                    )}
+                  </Stack>
+                </Box>
+              )}
+            </Stack>
+          </Box>
+        )}
+      </Stack>
+    );
   };
   const userSyncCurrentPageIds = useMemo(
     () => userSyncRows
@@ -2062,6 +2862,46 @@ function Dashboard({
     }
   };
 
+  const loadResultAccessStatuses = async (rows = []) => {
+    const requestId = createRequestId();
+    latestRequestIdsRef.current.resultAccess = requestId;
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) {
+      setResultAccessStatusMap({});
+      return;
+    }
+    const entries = await Promise.all(
+      list.map(async (row) => {
+        const competitionId = Number(row?.id);
+        if (Number.isNaN(competitionId) || competitionId <= 0) return [0, null];
+        try {
+          const { data } = await getCompetitionResultPublicStatus(competitionId, { requestId: createRequestId() });
+          return [competitionId, data || null];
+        } catch (error) {
+          const reason = getErrorText(error, '状态获取失败');
+          return [
+            competitionId,
+            {
+              competition_id: competitionId,
+              can_open_public_ranking: false,
+              can_open_my_score: false,
+              public_ranking_reason: reason,
+              my_score_reason: reason,
+            },
+          ];
+        }
+      })
+    );
+    if (latestRequestIdsRef.current.resultAccess !== requestId) return;
+    const nextMap = {};
+    entries.forEach(([competitionId, item]) => {
+      const id = Number(competitionId);
+      if (Number.isNaN(id) || id <= 0 || !item) return;
+      nextMap[id] = item;
+    });
+    setResultAccessStatusMap(nextMap);
+  };
+
   const loadMyContests = async (keyword = myContestKeyword, page = myContestPage) => {
     const requestId = createRequestId();
     latestRequestIdsRef.current.myContests = requestId;
@@ -2077,10 +2917,12 @@ function Dashboard({
       setMyContestTotalPages(totalPages);
       setMyContestHasNext(page < totalPages);
       setMyContestRows(items);
+      loadResultAccessStatuses(items);
     } catch (error) {
       if (latestRequestIdsRef.current.myContests !== requestId) return;
       setMyContestHasNext(false);
       setMyContestTotalPages(1);
+      setResultAccessStatusMap({});
       setMessage({ type: 'error', text: getErrorText(error, '加载我的比赛失败') });
     } finally {
       if (latestRequestIdsRef.current.myContests === requestId) setMyContestsLoading(false);
@@ -4104,15 +4946,26 @@ function Dashboard({
     latestRequestIdsRef.current.scoring = requestId;
     setScoringLoading(true);
     try {
-      const { data, requestId: echoedRequestId } = await getCompetitionScoringSettings(
-        safeCompetitionId,
-        { requestId }
-      );
+      const [scoringResp, aiReviewResp] = await Promise.all([
+        getCompetitionScoringSettings(
+          safeCompetitionId,
+          { requestId }
+        ),
+        getCompetitionAIReviewSettings(
+          safeCompetitionId,
+          { requestId: createRequestId() }
+        ).catch(() => null),
+      ]);
+      const { data, requestId: echoedRequestId } = scoringResp;
       if (latestRequestIdsRef.current.scoring !== echoedRequestId) return;
 
       const settings = data || null;
-      const nextMode = String(settings?.settings?.mode_key || 'single_score').trim() || 'single_score';
-      const nextRubricKey = String(settings?.settings?.rubric_key || DEFAULT_RUBRIC_KEY).trim() || DEFAULT_RUBRIC_KEY;
+      const nextMode = normalizeScoringModeKey(settings?.settings?.mode_key);
+      const nextRubricKey = String(
+        settings?.settings?.rubric_key
+          || getDefaultRubricKeyForScoringMode(nextMode)
+          || DEFAULT_SCORING_RUBRIC_KEY
+      ).trim() || DEFAULT_SCORING_RUBRIC_KEY;
       const nextVersionKey = String(settings?.settings?.rubric_version_key || '').trim();
       const runtimeFormatConfig = resolveCompetitionFormatConfig(competitionRow || scoringTarget || {});
       const competitionFormats = normalizeAllowedFormats(runtimeFormatConfig.allowed_formats, []);
@@ -4124,10 +4977,15 @@ function Dashboard({
       const nextReviewFormats = normalizedSavedFormats.filter((fmt) => formatOptions.includes(fmt));
       const fallbackReviewFormat = formatOptions.includes('pdf') ? 'pdf' : (formatOptions[0] || 'pdf');
       const nextAIReviewEnabled = toBoolFlag(settings?.settings?.ai_review_enabled, false);
+      const aiRunState = normalizeReviewRunState(
+        aiReviewResp?.data?.review_run_state ?? aiReviewResp?.data?.settings?.review_run_state
+      );
+      const aiReviewStarted = aiRunState !== 'not_started';
 
       setScoringSettings(settings);
       setScoringMode(nextMode);
-      setScoringCanEdit(Boolean(settings?.can_edit));
+      setScoringAIReviewStarted(aiReviewStarted);
+      setScoringCanEdit(Boolean(settings?.can_edit) && !aiReviewStarted);
       setScoringRubricVersionKey(nextVersionKey);
       setScoringReviewAttachmentFormats(nextReviewFormats.length ? nextReviewFormats : [fallbackReviewFormat]);
       setScoringAIReviewEnabled(nextAIReviewEnabled);
@@ -4139,7 +4997,7 @@ function Dashboard({
       const rows = Array.isArray(items) ? items : [];
       setScoringRubricVersions(rows);
 
-      if (nextMode === 'history_paper_quantitative' && !nextVersionKey) {
+      if (requiresScoringRubricVersion(nextMode) && !nextVersionKey) {
         const published = rows.find((item) => String(item?.status || '').toLowerCase() === 'published');
         if (published?.version_key) {
           setScoringRubricVersionKey(String(published.version_key));
@@ -4159,6 +5017,7 @@ function Dashboard({
       setScoringManualWeight('100');
       setScoringAIWeight('0');
       setScoringAIReviewEnabled(false);
+      setScoringAIReviewStarted(false);
       setScoringCanEdit(true);
       setScoringEditing(false);
       setMessage({ type: 'error', text: getErrorText(error, '加载评分设置失败') });
@@ -4173,7 +5032,7 @@ function Dashboard({
     setScoringTarget(row);
     setScoringOpen(true);
     setScoringSettings(null);
-    setScoringMode('single_score');
+    setScoringMode(DEFAULT_SCORING_MODE_KEY);
     setScoringRubricVersions([]);
     setScoringRubricVersionKey('');
     const runtimeFormatConfig = resolveCompetitionFormatConfig(row || {});
@@ -4185,6 +5044,7 @@ function Dashboard({
     setScoringManualWeight('100');
     setScoringAIWeight('0');
     setScoringAIReviewEnabled(false);
+    setScoringAIReviewStarted(false);
     setScoringCanEdit(true);
     setScoringEditing(false);
     await loadScoringSettings(safeCompetitionId, row);
@@ -4197,11 +5057,338 @@ function Dashboard({
     setAiReviewOpen(true);
   };
 
+  const openAIReviewProgressDialog = (row) => {
+    const safeCompetitionId = Number(row?.id);
+    if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
+    setAiReviewProgressTarget(row);
+    setAiReviewProgressOpen(true);
+  };
+
+  const loadCompetitionResultRows = async ({
+    competitionId,
+    keyword = competitionResultKeyword,
+    page = competitionResultPage,
+    sortBy = competitionResultSortBy,
+    sortOrder = competitionResultSortOrder,
+  }) => {
+    if (Number.isNaN(Number(competitionId)) || Number(competitionId) <= 0) return;
+    const requestId = createRequestId();
+    latestRequestIdsRef.current.competitionResults = requestId;
+    setCompetitionResultLoading(true);
+    try {
+      const safePage = Math.max(1, Number(page) || 1);
+      const offset = (safePage - 1) * RESULT_PAGE_SIZE;
+      const { items, total, publication, requestId: echoedRequestId } = await listCompetitionResultsPaged(
+        Number(competitionId),
+        RESULT_PAGE_SIZE,
+        offset,
+        keyword || '',
+        {
+          sortBy,
+          sortOrder,
+          requestId,
+        }
+      );
+      if (latestRequestIdsRef.current.competitionResults !== echoedRequestId) return;
+      const rows = Array.isArray(items) ? items : [];
+      const totalPages = Math.max(1, Math.ceil((Number(total) || 0) / RESULT_PAGE_SIZE));
+      setCompetitionResultRows(rows);
+      setCompetitionResultTotalPages(totalPages);
+      setCompetitionResultHasNext(safePage < totalPages);
+      setCompetitionResultPublication(publication || null);
+    } catch (error) {
+      if (latestRequestIdsRef.current.competitionResults !== requestId) return;
+      setCompetitionResultRows([]);
+      setCompetitionResultTotalPages(1);
+      setCompetitionResultHasNext(false);
+      setCompetitionResultPublication(null);
+      setMessage({ type: 'error', text: getErrorText(error, '加载比赛结果失败') });
+    } finally {
+      if (latestRequestIdsRef.current.competitionResults === requestId) setCompetitionResultLoading(false);
+    }
+  };
+
+  const openCompetitionResultDialog = async (row) => {
+    const competitionId = Number(row?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    setCompetitionResultTarget(row);
+    setCompetitionResultKeywordInput('');
+    setCompetitionResultKeyword('');
+    setCompetitionResultSortBy('final_score');
+    setCompetitionResultSortOrder('desc');
+    setCompetitionResultPage(1);
+    setCompetitionResultRows([]);
+    setCompetitionResultHasNext(false);
+    setCompetitionResultTotalPages(1);
+    setCompetitionResultPublication(null);
+    setCompetitionResultRankingPublishConfirmOpen(false);
+    setCompetitionResultRankingPreviewRows([]);
+    setCompetitionResultRankingPreviewLoading(false);
+    setCompetitionResultRankingPreviewError('');
+    setCompetitionResultDetailPublishConfirmOpen(false);
+    setCompetitionResultOpen(true);
+    await loadCompetitionResultRows({
+      competitionId,
+      keyword: '',
+      page: 1,
+      sortBy: 'final_score',
+      sortOrder: 'desc',
+    });
+  };
+
+  const searchCompetitionResults = async () => {
+    const competitionId = Number(competitionResultTarget?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    const keyword = String(competitionResultKeywordInput || '').trim();
+    setCompetitionResultKeyword(keyword);
+    setCompetitionResultPage(1);
+    await loadCompetitionResultRows({
+      competitionId,
+      keyword,
+      page: 1,
+      sortBy: competitionResultSortBy,
+      sortOrder: competitionResultSortOrder,
+    });
+  };
+
+  const changeCompetitionResultPage = async (nextPage) => {
+    const competitionId = Number(competitionResultTarget?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    const safePage = Math.max(1, Number(nextPage) || 1);
+    setCompetitionResultPage(safePage);
+    await loadCompetitionResultRows({
+      competitionId,
+      keyword: competitionResultKeyword,
+      page: safePage,
+      sortBy: competitionResultSortBy,
+      sortOrder: competitionResultSortOrder,
+    });
+  };
+
+  const applyCompetitionResultSort = async (nextSortBy, nextSortOrder) => {
+    const competitionId = Number(competitionResultTarget?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    setCompetitionResultSortBy(nextSortBy);
+    setCompetitionResultSortOrder(nextSortOrder);
+    setCompetitionResultPage(1);
+    await loadCompetitionResultRows({
+      competitionId,
+      keyword: competitionResultKeyword,
+      page: 1,
+      sortBy: nextSortBy,
+      sortOrder: nextSortOrder,
+    });
+  };
+
+  const publishCompetitionResultData = async ({ publishRanking = null, publishDetail = null }) => {
+    const competitionId = Number(competitionResultTarget?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    setCompetitionResultPublishing(true);
+    try {
+      const { data } = await updateCompetitionResultPublishSettings(
+        competitionId,
+        {
+          publish_ranking: publishRanking,
+          publish_detail: publishDetail,
+        },
+        { requestId: createRequestId() }
+      );
+      setCompetitionResultPublication(data || null);
+      setMessage({ type: 'success', text: '发布状态已更新' });
+      await loadCompetitionResultRows({
+        competitionId,
+        keyword: competitionResultKeyword,
+        page: competitionResultPage,
+        sortBy: competitionResultSortBy,
+        sortOrder: competitionResultSortOrder,
+      });
+    } catch (error) {
+      setMessage({ type: 'error', text: getErrorText(error, '更新发布状态失败') });
+    } finally {
+      setCompetitionResultPublishing(false);
+    }
+  };
+
+  const loadCompetitionResultRankingPreview = async (competitionId) => {
+    const requestId = createRequestId();
+    latestRequestIdsRef.current.rankingPreview = requestId;
+    setCompetitionResultRankingPreviewLoading(true);
+    setCompetitionResultRankingPreviewError('');
+    setCompetitionResultRankingPreviewRows([]);
+    try {
+      const mergedRows = [];
+      let offset = 0;
+      let total = Number.POSITIVE_INFINITY;
+      while (offset < total) {
+        const { items, total: batchTotal } = await listCompetitionResultsPaged(
+          Number(competitionId),
+          RESULT_PREVIEW_PAGE_SIZE,
+          offset,
+          '',
+          {
+            sortBy: 'final_score',
+            sortOrder: 'desc',
+            requestId: createRequestId(),
+          }
+        );
+        const batchRows = Array.isArray(items) ? items : [];
+        mergedRows.push(...batchRows);
+        total = Math.max(0, Number(batchTotal) || 0);
+        offset += batchRows.length;
+        if (!batchRows.length || offset >= total) break;
+      }
+      if (latestRequestIdsRef.current.rankingPreview !== requestId) return;
+      setCompetitionResultRankingPreviewRows(buildPublicRankingPreviewRows(mergedRows));
+    } catch (error) {
+      if (latestRequestIdsRef.current.rankingPreview !== requestId) return;
+      setCompetitionResultRankingPreviewError(getErrorText(error, '加载总榜详情失败，请稍后重试'));
+      setCompetitionResultRankingPreviewRows([]);
+    } finally {
+      if (latestRequestIdsRef.current.rankingPreview === requestId) {
+        setCompetitionResultRankingPreviewLoading(false);
+      }
+    }
+  };
+
+  const requestPublishCompetitionResultRanking = async () => {
+    if (competitionResultPublishing) return;
+    const competitionId = Number(competitionResultTarget?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    setCompetitionResultRankingPublishConfirmOpen(true);
+    await loadCompetitionResultRankingPreview(competitionId);
+  };
+
+  const requestPublishCompetitionResultDetail = () => {
+    if (competitionResultPublishing) return;
+    setCompetitionResultDetailPublishConfirmOpen(true);
+  };
+
+  const confirmPublishCompetitionResultRanking = async () => {
+    latestRequestIdsRef.current.rankingPreview = '';
+    setCompetitionResultRankingPublishConfirmOpen(false);
+    setCompetitionResultRankingPreviewRows([]);
+    setCompetitionResultRankingPreviewLoading(false);
+    setCompetitionResultRankingPreviewError('');
+    await publishCompetitionResultData({ publishRanking: true });
+  };
+
+  const confirmPublishCompetitionResultDetail = async () => {
+    setCompetitionResultDetailPublishConfirmOpen(false);
+    await publishCompetitionResultData({ publishDetail: true });
+  };
+
+  const exportCompetitionResultExcel = async () => {
+    const competitionId = Number(competitionResultTarget?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    setCompetitionResultExporting(true);
+    try {
+      const { blob, fileName } = await exportCompetitionResultsBlob(
+        competitionId,
+        {
+          keyword: competitionResultKeyword,
+          sortBy: competitionResultSortBy,
+          sortOrder: competitionResultSortOrder,
+          requestId: createRequestId(),
+        }
+      );
+      if (!blob) {
+        setMessage({ type: 'warning', text: '导出结果为空，请稍后重试' });
+        return;
+      }
+      downloadBlobFile(blob, fileName || '比赛结果.xlsx');
+      setMessage({ type: 'success', text: '比赛结果导出成功' });
+    } catch (error) {
+      setMessage({ type: 'error', text: getErrorText(error, '导出比赛结果失败') });
+    } finally {
+      setCompetitionResultExporting(false);
+    }
+  };
+
+  const openCompetitionResultDetail = async (row) => {
+    const competitionId = Number(competitionResultTarget?.id);
+    const participantUserId = Number(row?.user_id);
+    if (Number.isNaN(competitionId) || competitionId <= 0 || Number.isNaN(participantUserId) || participantUserId <= 0) return;
+    setCompetitionResultDetailOpen(true);
+    setCompetitionResultDetailLoading(true);
+    setCompetitionResultDetailData(null);
+    try {
+      const { data } = await getCompetitionParticipantResultDetail(
+        competitionId,
+        participantUserId,
+        { requestId: createRequestId() }
+      );
+      setCompetitionResultDetailData(data || null);
+    } catch (error) {
+      setCompetitionResultDetailOpen(false);
+      setMessage({ type: 'error', text: getErrorText(error, '加载成绩详情失败') });
+    } finally {
+      setCompetitionResultDetailLoading(false);
+    }
+  };
+
+  const openPublicRankingDialog = async (row) => {
+    const competitionId = Number(row?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    setPublicResultTarget(row);
+    setPublicResultRows([]);
+    setPublicResultPublication(null);
+    setPublicResultOpen(true);
+    setPublicResultLoading(true);
+    const requestId = createRequestId();
+    latestRequestIdsRef.current.publicResults = requestId;
+    try {
+      const { data, requestId: echoedRequestId } = await getCompetitionPublicRanking(
+        competitionId,
+        { requestId }
+      );
+      if (latestRequestIdsRef.current.publicResults !== echoedRequestId) return;
+      setPublicResultRows(Array.isArray(data?.items) ? data.items : []);
+      setPublicResultPublication(data?.publication || null);
+    } catch (error) {
+      if (latestRequestIdsRef.current.publicResults !== requestId) return;
+      setPublicResultRows([]);
+      setPublicResultPublication(null);
+      setMessage({ type: 'error', text: getErrorText(error, '加载公开总榜失败') });
+    } finally {
+      if (latestRequestIdsRef.current.publicResults === requestId) setPublicResultLoading(false);
+    }
+  };
+
+  const openMyScoreDialog = async (row) => {
+    const competitionId = Number(row?.id);
+    if (Number.isNaN(competitionId) || competitionId <= 0) return;
+    setMyScoreTarget(row);
+    setMyScoreDetailData(null);
+    setMyScoreOpen(true);
+    setMyScoreLoading(true);
+    const requestId = createRequestId();
+    latestRequestIdsRef.current.myScore = requestId;
+    try {
+      const { data, requestId: echoedRequestId } = await getMyCompetitionResultDetail(
+        competitionId,
+        { requestId }
+      );
+      if (latestRequestIdsRef.current.myScore !== echoedRequestId) return;
+      setMyScoreDetailData(data || null);
+    } catch (error) {
+      if (latestRequestIdsRef.current.myScore !== requestId) return;
+      setMyScoreDetailData(null);
+      setMyScoreOpen(false);
+      setMessage({ type: 'error', text: getErrorText(error, '加载我的成绩失败') });
+    } finally {
+      if (latestRequestIdsRef.current.myScore === requestId) setMyScoreLoading(false);
+    }
+  };
+
   const submitScoringSettings = async () => {
     const safeCompetitionId = Number(scoringTarget?.id);
     if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
+    if (scoringAIReviewStarted) {
+      setMessage({ type: 'warning', text: 'AI评审已开始，评分设置不可修改' });
+      return;
+    }
 
-    const normalizedMode = String(scoringMode || '').trim() || 'single_score';
+    const normalizedMode = normalizeScoringModeKey(scoringMode);
     const availableFormats = Array.isArray(scoringFormatOptions) && scoringFormatOptions.length
       ? scoringFormatOptions
       : [...DEFAULT_SCORING_REVIEW_FORMATS];
@@ -4224,6 +5411,10 @@ function Dashboard({
       setMessage({ type: 'warning', text: '人工/AI权重必须在 0-100 之间' });
       return;
     }
+    if (scoringAIReviewEnabled && (roundedAIWeight <= 0 || roundedAIWeight >= 100)) {
+      setMessage({ type: 'warning', text: '启用AI评审时，AI评审权重必须大于0且小于100' });
+      return;
+    }
     if (Math.abs((roundedManualWeight + roundedAIWeight) - 100) > 0.0001) {
       setMessage({ type: 'warning', text: '人工评审权重与 AI 评审权重之和必须等于 100' });
       return;
@@ -4236,13 +5427,13 @@ function Dashboard({
       ai_score_weight: roundedAIWeight,
       ai_review_enabled: scoringAIReviewEnabled,
     };
-    if (normalizedMode === 'history_paper_quantitative') {
+    if (requiresScoringRubricVersion(normalizedMode)) {
       const versionKey = String(scoringRubricVersionKey || '').trim();
       if (!versionKey) {
         setMessage({ type: 'warning', text: '请选择评分规则版本' });
         return;
       }
-      payload.rubric_key = DEFAULT_RUBRIC_KEY;
+      payload.rubric_key = getDefaultRubricKeyForScoringMode(normalizedMode) || DEFAULT_SCORING_RUBRIC_KEY;
       payload.rubric_version_key = versionKey;
     }
 
@@ -4270,6 +5461,10 @@ function Dashboard({
   const unlockScoringSettings = async () => {
     const safeCompetitionId = Number(scoringTarget?.id);
     if (Number.isNaN(safeCompetitionId) || safeCompetitionId <= 0) return;
+    if (scoringAIReviewStarted) {
+      setMessage({ type: 'warning', text: 'AI评审已开始，评分设置不可解锁' });
+      return;
+    }
     setScoringUnlocking(true);
     try {
       const { data } = await unlockCompetitionScoringSettings(
@@ -4728,7 +5923,17 @@ function Dashboard({
                           openAIReviewDialog(row);
                         }}
                       >
-                        AI评审配置
+                        AI评审
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openCompetitionResultDialog(row);
+                        }}
+                      >
+                        比赛结果
                       </Button>
                       <Button
                         variant="outlined"
@@ -4826,6 +6031,19 @@ function Dashboard({
             {myContestRowsDisplay.map((row) => {
               const s = statusOf(row);
               const submittedInfo = submittedCompetitionMap[Number(row.id)] || null;
+              const accessStatus = resultAccessStatusMap[Number(row.id)] || null;
+              const canOpenPublicRanking = Boolean(accessStatus?.can_open_public_ranking);
+              const canOpenMyScore = Boolean(accessStatus?.can_open_my_score);
+              const publicRankingReason = String(accessStatus?.public_ranking_reason || '状态加载中').trim();
+              const myScoreReason = String(accessStatus?.my_score_reason || '状态加载中').trim();
+              const disabledActionButtonSx = {
+                '&.Mui-disabled': {
+                  color: 'rgba(31, 31, 46, 0.38)',
+                  borderColor: '#d8d8e5',
+                  backgroundColor: 'transparent !important',
+                  boxShadow: 'none',
+                },
+              };
               return (
                 <TableRow key={`registered_${row.id}`} hover onClick={() => openDetail(row, false)} sx={{ cursor: 'pointer' }}>
                   <TableCell sx={{ fontWeight: 700 }}>
@@ -4837,15 +6055,17 @@ function Dashboard({
                     )}
                   </TableCell>
                   <TableCell align="center"><Chip size="small" color={s.color} label={s.label} /></TableCell>
-                  <TableCell align="center">
-                    <Stack direction="row" spacing={1} justifyContent="center">
-                      <Button variant="outlined" size="small" onClick={(e) => { e.stopPropagation(); openMyInfo(row); }}>我的信息</Button>
-                      <Button variant="outlined" size="small" onClick={(e) => { e.stopPropagation(); openDetail(row, false); }}>查看详情</Button>
-                      {s.key === 'ongoing' && (
+                  <TableCell align="center" onClick={(e) => { e.stopPropagation(); }}>
+                    <Stack direction="column" spacing={1} justifyContent="center" alignItems="center">
+                      <Stack direction="row" spacing={1} justifyContent="center">
+                        <Button variant="outlined" size="small" sx={disabledActionButtonSx} onClick={(e) => { e.stopPropagation(); openMyInfo(row); }}>我的信息</Button>
+                        <Button variant="outlined" size="small" sx={disabledActionButtonSx} onClick={(e) => { e.stopPropagation(); openDetail(row, false); }}>查看详情</Button>
                         <Button
                           variant={submittedInfo ? 'outlined' : 'contained'}
                           color={submittedInfo ? 'warning' : 'primary'}
                           size="small"
+                          disabled={s.key !== 'ongoing'}
+                          sx={disabledActionButtonSx}
                           onClick={(e) => {
                             e.stopPropagation();
                             openSubmissionDialog(row);
@@ -4853,19 +6073,48 @@ function Dashboard({
                         >
                           {submittedInfo ? '修改作品' : '提交作品'}
                         </Button>
-                      )}
-                      <Button
-                        variant="outlined"
-                        color="error"
-                        size="small"
-                        disabled={!canQuitCompetition(row)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openQuitDialog(row);
-                        }}
-                      >
-                        退出比赛
-                      </Button>
+                      </Stack>
+                      <Stack direction="row" spacing={1} justifyContent="center">
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          disabled={!canOpenPublicRanking}
+                          sx={disabledActionButtonSx}
+                          title={canOpenPublicRanking ? '' : publicRankingReason}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openPublicRankingDialog(row);
+                          }}
+                        >
+                          比赛结果
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          disabled={!canOpenMyScore}
+                          sx={disabledActionButtonSx}
+                          title={canOpenMyScore ? '' : myScoreReason}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openMyScoreDialog(row);
+                          }}
+                        >
+                          我的成绩
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          size="small"
+                          disabled={!canQuitCompetition(row)}
+                          sx={disabledActionButtonSx}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openQuitDialog(row);
+                          }}
+                        >
+                          退出比赛
+                        </Button>
+                      </Stack>
                     </Stack>
                   </TableCell>
                 </TableRow>
@@ -5657,67 +6906,12 @@ function Dashboard({
             )}
           </Box>
           <Stack direction="row" spacing={1}>
-            {detailData && detailTrainingManualMeta?.can_manage && (
-              <Button
-                variant="outlined"
-                onClick={() => openTrainingManualPage(detailData, {
-                  fromDetail: true,
-                  manualMeta: detailTrainingManualMeta,
-                })}
-              >
-                比赛手册
-              </Button>
-            )}
             {detailData && (detailFromMine || canCreateCompetition) && (
               <Button
                 variant="outlined"
                 onClick={() => openParticipants(detailData)}
               >
                 参赛选手信息
-              </Button>
-            )}
-            {detailData && (detailFromMine || canCreateCompetition) && (
-              <Button
-                variant="outlined"
-                onClick={() => openJudgeDialog(detailData)}
-              >
-                评委管理
-              </Button>
-            )}
-            {detailData && (detailFromMine || canCreateCompetition) && (
-              <Button
-                variant="outlined"
-                onClick={() => openScoringDialog(detailData)}
-              >
-                评分设置
-              </Button>
-            )}
-            {detailData && (detailFromMine || canCreateCompetition) && (
-              <Button
-                variant="outlined"
-                onClick={() => openAIReviewDialog(detailData)}
-              >
-                AI评审配置
-              </Button>
-            )}
-            {detailFromMine && detailData && (
-              <Button
-                variant="outlined"
-                onClick={() => {
-                  setDetailOpen(false);
-                  openEdit(detailData);
-                }}
-              >
-                修改比赛
-              </Button>
-            )}
-            {detailFromMine && detailData && (
-              <Button
-                variant="outlined"
-                color="error"
-                onClick={() => openDeleteDialog(detailData)}
-              >
-                删除比赛
               </Button>
             )}
             <Button onClick={() => setDetailOpen(false)}>关闭</Button>
@@ -6554,7 +7748,9 @@ function Dashboard({
               </Alert>
               {!scoringCanEdit && (
                 <Alert severity="warning">
-                  当前评分设置已锁定（评审已开始或已产生评分），仅支持查看。
+                  {scoringAIReviewStarted
+                    ? '当前评分设置已锁定（AI评审已开始），仅支持查看。'
+                    : '当前评分设置已锁定（评审已开始或已产生评分），仅支持查看。'}
                 </Alert>
               )}
               {scoringCanEdit && !scoringEditing && (
@@ -6562,7 +7758,7 @@ function Dashboard({
                   当前为已保存设置。点击“修改设置”后才可编辑，修改完成后请再次保存。
                 </Alert>
               )}
-              {!scoringCanEdit && (
+              {!scoringCanEdit && !scoringAIReviewStarted && (
                 <Button
                   size="small"
                   variant="outlined"
@@ -6579,10 +7775,10 @@ function Dashboard({
                   value={scoringMode}
                   disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking}
                   onChange={(event) => {
-                    const nextMode = String(event.target.value || '').trim() || 'single_score';
+                    const nextMode = normalizeScoringModeKey(event.target.value);
                     setScoringMode(nextMode);
-                    if (nextMode === 'single_score') setScoringRubricVersionKey('');
-                    if (nextMode === 'history_paper_quantitative' && !scoringRubricVersionKey) {
+                    if (!requiresScoringRubricVersion(nextMode)) setScoringRubricVersionKey('');
+                    if (requiresScoringRubricVersion(nextMode) && !scoringRubricVersionKey) {
                       const published = scoringRubricVersions.find((item) => String(item?.status || '').toLowerCase() === 'published');
                       if (published?.version_key) setScoringRubricVersionKey(String(published.version_key));
                     }
@@ -6594,7 +7790,7 @@ function Dashboard({
                 </Select>
               </FormControl>
 
-              {scoringMode === 'history_paper_quantitative' && (
+              {requiresScoringRubricVersion(scoringMode) && (
                 <FormControl fullWidth size="small">
                   <InputLabel>评分规则版本</InputLabel>
                   <Select
@@ -6678,7 +7874,7 @@ function Dashboard({
                   value={scoringManualWeight}
                   disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking || !scoringAIReviewEnabled}
                   onChange={(event) => setScoringManualWeight(String(event.target.value || '').trim())}
-                  inputProps={{ min: 0, max: 100, step: 0.01 }}
+                  inputProps={{ min: 0.01, max: 99.99, step: 0.01 }}
                 />
                 <TextField
                   fullWidth
@@ -6688,12 +7884,12 @@ function Dashboard({
                   value={scoringAIWeight}
                   disabled={!scoringCanEdit || !scoringEditing || scoringSaving || scoringUnlocking || !scoringAIReviewEnabled}
                   onChange={(event) => setScoringAIWeight(String(event.target.value || '').trim())}
-                  inputProps={{ min: 0, max: 100, step: 0.01 }}
+                  inputProps={{ min: 0.01, max: 99.99, step: 0.01 }}
                 />
               </Stack>
               <Typography variant="caption" color="text.secondary" sx={{ px: 0.5 }}>
                 {scoringAIReviewEnabled
-                  ? '人工评审权重 + AI 评审权重 = 100%，用于计算选手最终得分。'
+                  ? '启用 AI 评审时，AI 评审权重必须大于 0 且小于 100，且人工评审权重 + AI 评审权重 = 100%。'
                   : 'AI 评审停用时，最终得分仅使用人工评审。'}
               </Typography>
 
@@ -6758,12 +7954,548 @@ function Dashboard({
         </DialogActions>
       </Dialog>
 
+      <Dialog
+        open={competitionResultOpen}
+        onClose={(event, reason) => {
+          if (competitionResultLoading || competitionResultPublishing || competitionResultExporting || reason === 'backdropClick') return;
+          setCompetitionResultOpen(false);
+          setCompetitionResultTarget(null);
+          setCompetitionResultRankingPublishConfirmOpen(false);
+          latestRequestIdsRef.current.rankingPreview = '';
+          setCompetitionResultRankingPreviewRows([]);
+          setCompetitionResultRankingPreviewLoading(false);
+          setCompetitionResultRankingPreviewError('');
+          setCompetitionResultDetailPublishConfirmOpen(false);
+        }}
+        fullWidth
+        maxWidth="xl"
+        PaperProps={{
+          sx: {
+            width: '92vw',
+            maxWidth: 1620,
+            height: '82vh',
+          },
+        }}
+      >
+        <DialogTitle>比赛结果（比赛：{competitionResultTarget?.name || competitionResultTarget?.id || '-'}）</DialogTitle>
+        <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column' }}>
+          <Stack spacing={1.2}>
+            <Alert severity="info">
+              结果大表会持续更新选手状态；当“已提交作品”全部生成最终分后，可手动发布总榜与成绩详情。
+            </Alert>
+
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1}>
+              <TextField
+                fullWidth
+                size="small"
+                label="搜索选手（姓名/邮箱/手机号）"
+                value={competitionResultKeywordInput}
+                onChange={(event) => setCompetitionResultKeywordInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') searchCompetitionResults();
+                }}
+              />
+              <FormControl size="small" sx={{ minWidth: 150 }}>
+                <InputLabel>排序字段</InputLabel>
+                <Select
+                  label="排序字段"
+                  value={competitionResultSortBy}
+                  onChange={(event) => applyCompetitionResultSort(String(event.target.value || 'final_score'), competitionResultSortOrder)}
+                >
+                  {RESULT_SORT_OPTIONS.map((item) => (
+                    <MenuItem key={`result_sort_${item.value}`} value={item.value}>{item.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={{ minWidth: 120 }}>
+                <InputLabel>排序方向</InputLabel>
+                <Select
+                  label="排序方向"
+                  value={competitionResultSortOrder}
+                  onChange={(event) => applyCompetitionResultSort(competitionResultSortBy, String(event.target.value || 'desc'))}
+                >
+                  <MenuItem value="desc">降序</MenuItem>
+                  <MenuItem value="asc">升序</MenuItem>
+                </Select>
+              </FormControl>
+              <Button variant="contained" onClick={searchCompetitionResults} disabled={competitionResultLoading}>
+                搜索
+              </Button>
+              <Button
+                variant="outlined"
+                onClick={() => {
+                  setCompetitionResultKeywordInput('');
+                  setCompetitionResultKeyword('');
+                  setCompetitionResultPage(1);
+                  const competitionId = Number(competitionResultTarget?.id);
+                  if (!Number.isNaN(competitionId) && competitionId > 0) {
+                    loadCompetitionResultRows({
+                      competitionId,
+                      keyword: '',
+                      page: 1,
+                      sortBy: competitionResultSortBy,
+                      sortOrder: competitionResultSortOrder,
+                    });
+                  }
+                }}
+                disabled={competitionResultLoading}
+              >
+                清空
+              </Button>
+            </Stack>
+
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1}>
+              <Button
+                variant="outlined"
+                disabled={
+                  competitionResultLoading
+                  || competitionResultPublishing
+                  || Boolean(competitionResultPublication?.ranking_published)
+                  || !Boolean(competitionResultPublication?.ranking_visible_configured)
+                  || !Boolean(competitionResultPublication?.all_results_ready)
+                }
+                title={
+                  competitionResultPublication?.ranking_published
+                    ? '总榜已发布'
+                    : !competitionResultPublication?.ranking_visible_configured
+                      ? '比赛创建时未开启公开排名'
+                      : (!competitionResultPublication?.review_finished && Number(competitionResultPublication?.pending_total || 0) > 0)
+                        ? '仍有作品未完成评审，需等待评审结束后再发布'
+                      : !competitionResultPublication?.all_results_ready
+                        ? '比赛结果尚未全部产出'
+                        : ''
+                }
+                onClick={requestPublishCompetitionResultRanking}
+              >
+                {competitionResultPublication?.ranking_published ? '总榜已发布' : '发布总榜'}
+              </Button>
+              <Button
+                variant="outlined"
+                disabled={
+                  competitionResultLoading
+                  || competitionResultPublishing
+                  || Boolean(competitionResultPublication?.detail_published)
+                  || !Boolean(competitionResultPublication?.detail_visible_configured)
+                  || !Boolean(competitionResultPublication?.all_results_ready)
+                }
+                title={
+                  competitionResultPublication?.detail_published
+                    ? '成绩详情已发布'
+                    : !competitionResultPublication?.detail_visible_configured
+                      ? '比赛创建时未开启评分详情公开'
+                      : (!competitionResultPublication?.review_finished && Number(competitionResultPublication?.pending_total || 0) > 0)
+                        ? '仍有作品未完成评审，需等待评审结束后再发布'
+                      : !competitionResultPublication?.all_results_ready
+                        ? '比赛结果尚未全部产出'
+                        : ''
+                }
+                onClick={requestPublishCompetitionResultDetail}
+              >
+                {competitionResultPublication?.detail_published ? '成绩详情已发布' : '发布成绩详情'}
+              </Button>
+              <Button
+                variant="outlined"
+                onClick={exportCompetitionResultExcel}
+                disabled={competitionResultLoading || competitionResultExporting}
+              >
+                {competitionResultExporting ? '导出中...' : '导出Excel'}
+              </Button>
+              <Typography variant="body2" color="text.secondary" sx={{ alignSelf: 'center' }}>
+                已提交：{competitionResultPublication?.submitted_total ?? 0}，
+                已完成：{competitionResultPublication?.ready_total ?? 0}，
+                待完成：{competitionResultPublication?.pending_total ?? 0}
+              </Typography>
+            </Stack>
+            {!Boolean(competitionResultPublication?.review_finished) && Number(competitionResultPublication?.pending_total || 0) > 0 && (
+              <Alert severity="info">
+                当前评审尚未结束，且仍有作品未完成评审，暂不可发布总榜与成绩详情。
+              </Alert>
+            )}
+            {Boolean(competitionResultPublication?.ai_review_enabled) && !Boolean(competitionResultPublication?.ai_review_started) && (
+              <Alert severity="warning">
+                当前比赛已启用 AI 评审，但尚未手动开启评审。请先在“AI评审”中启动正式评审，再发布总榜或成绩详情。
+              </Alert>
+            )}
+            {Boolean(competitionResultPublication?.ai_review_enabled) && Boolean(competitionResultPublication?.ai_review_started) && (
+              <Alert severity={Number(competitionResultPublication?.ai_review_pending_total || 0) > 0 ? 'info' : 'success'}>
+                AI评审进度：已完成 {competitionResultPublication?.ai_review_completed_total ?? 0} / {competitionResultPublication?.submitted_total ?? 0}
+                {Number(competitionResultPublication?.ai_review_pending_total || 0) > 0 ? '，未全部完成前不可发布结果。' : '，已全部完成。'}
+              </Alert>
+            )}
+
+            {competitionResultLoading ? (
+              <Stack alignItems="center" sx={{ py: 4 }} spacing={1}>
+                <CircularProgress size={24} />
+                <Typography variant="body2" color="text.secondary">比赛结果加载中...</Typography>
+              </Stack>
+            ) : !competitionResultRows.length ? (
+              <Typography color="text.secondary">暂无比赛结果数据</Typography>
+            ) : (
+              <TableContainer sx={{ border: `1px solid ${CONTEST_THEME.tableBorder}`, borderRadius: 2, maxHeight: '56vh' }}>
+                <Table size="medium" stickyHeader sx={{ minWidth: 1320 }}>
+                  <TableHead>
+                    <TableRow sx={{ background: CONTEST_THEME.tableHeadBg }}>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>排名</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>选手名</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>邮箱</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>手机号</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>提交状态</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>人工分</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>AI分</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>最终分</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>更新时间</TableCell>
+                      <TableCell align="center">操作</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {competitionResultRows.map((row, index) => (
+                      <TableRow key={`competition_result_row_${row.participant_id || index}`} hover>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{row.rank ?? '-'}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{row.name || '-'}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{row.email || '-'}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{row.phone || '-'}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{resultSubmissionStatusLabel(row.submission_status)}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{resultManualScoreDisplay(row)}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{resultAIScoreDisplay(row)}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{row.final_score ?? '-'}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatTimeValue(row.updated_at, '-')}</TableCell>
+                        <TableCell align="center">
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            disabled={!row?.user_id}
+                            onClick={() => openCompetitionResultDetail(row)}
+                          >
+                            成绩详情
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            )}
+
+            {!competitionResultLoading && !!competitionResultRows.length && (
+              <Stack direction="row" justifyContent="flex-end" alignItems="center" spacing={1}>
+                <Typography variant="body2" color="text.secondary">
+                  {competitionResultPage}/{competitionResultTotalPages} 页
+                </Typography>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  disabled={competitionResultPage <= 1}
+                  onClick={() => changeCompetitionResultPage(competitionResultPage - 1)}
+                >
+                  上一页
+                </Button>
+                <Button
+                  size="small"
+                  variant="contained"
+                  disabled={!competitionResultHasNext}
+                  onClick={() => changeCompetitionResultPage(competitionResultPage + 1)}
+                >
+                  下一页
+                </Button>
+              </Stack>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setCompetitionResultOpen(false);
+              setCompetitionResultTarget(null);
+              setCompetitionResultRankingPublishConfirmOpen(false);
+              latestRequestIdsRef.current.rankingPreview = '';
+              setCompetitionResultRankingPreviewRows([]);
+              setCompetitionResultRankingPreviewLoading(false);
+              setCompetitionResultRankingPreviewError('');
+              setCompetitionResultDetailPublishConfirmOpen(false);
+            }}
+            disabled={competitionResultLoading || competitionResultPublishing || competitionResultExporting}
+          >
+            关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={competitionResultRankingPublishConfirmOpen}
+        onClose={() => {
+          if (competitionResultPublishing) return;
+          latestRequestIdsRef.current.rankingPreview = '';
+          setCompetitionResultRankingPublishConfirmOpen(false);
+          setCompetitionResultRankingPreviewRows([]);
+          setCompetitionResultRankingPreviewLoading(false);
+          setCompetitionResultRankingPreviewError('');
+        }}
+        fullWidth
+        maxWidth="lg"
+      >
+        <DialogTitle>成绩总榜</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.2}>
+            <Alert severity="info">
+              以下是即将对外发布的“成绩总榜详情预览”（仅公开字段）。
+            </Alert>
+            <Typography variant="body2" color="text.secondary">
+              公开范围：{rankingVisibilityText(competitionResultTarget?.ranking_visibility)}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              公开字段：排名、选手名、邮箱、最终分
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              不公开字段：手机号、提交状态、人工分、AI分、人工评语、AI评语及结构化明细
+            </Typography>
+
+            {competitionResultRankingPreviewLoading ? (
+              <Stack alignItems="center" spacing={1} sx={{ py: 2 }}>
+                <CircularProgress size={24} />
+                <Typography variant="body2" color="text.secondary">加载总榜详情中...</Typography>
+              </Stack>
+            ) : competitionResultRankingPreviewError ? (
+              <Alert severity="error">{competitionResultRankingPreviewError}</Alert>
+            ) : !competitionResultRankingPreviewRows.length ? (
+              <Alert severity="warning">暂无可发布的总榜数据（未找到有最终分的选手）。</Alert>
+            ) : (
+              <>
+                <TableContainer sx={{ border: `1px solid ${CONTEST_THEME.tableBorder}`, borderRadius: 2, maxHeight: '46vh' }}>
+                  <Table size="small" stickyHeader>
+                    <TableHead>
+                      <TableRow sx={{ background: CONTEST_THEME.tableHeadBg }}>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>排名</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>选手名</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>邮箱</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>最终分</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {competitionResultRankingPreviewRows.map((item, index) => (
+                        <TableRow key={`ranking_publish_preview_${index}`} hover>
+                          <TableCell sx={{ whiteSpace: 'nowrap' }}>{item?.rank ?? '-'}</TableCell>
+                          <TableCell sx={{ whiteSpace: 'nowrap' }}>{item?.name || '-'}</TableCell>
+                          <TableCell sx={{ whiteSpace: 'nowrap' }}>{item?.email_masked || '-'}</TableCell>
+                          <TableCell sx={{ whiteSpace: 'nowrap' }}>{item?.final_score ?? '-'}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+                <Typography variant="body2" color="text.secondary">
+                  预览共 {competitionResultRankingPreviewRows.length} 条可公开总榜记录。
+                </Typography>
+              </>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              latestRequestIdsRef.current.rankingPreview = '';
+              setCompetitionResultRankingPublishConfirmOpen(false);
+              setCompetitionResultRankingPreviewRows([]);
+              setCompetitionResultRankingPreviewLoading(false);
+              setCompetitionResultRankingPreviewError('');
+            }}
+            disabled={competitionResultPublishing}
+          >
+            取消
+          </Button>
+          <Button
+            variant="contained"
+            onClick={confirmPublishCompetitionResultRanking}
+            disabled={
+              competitionResultPublishing
+              || competitionResultRankingPreviewLoading
+              || Boolean(competitionResultRankingPreviewError)
+              || !competitionResultRankingPreviewRows.length
+            }
+          >
+            {competitionResultPublishing ? '发布中...' : '确认发布'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={competitionResultDetailPublishConfirmOpen}
+        onClose={() => {
+          if (competitionResultPublishing) return;
+          setCompetitionResultDetailPublishConfirmOpen(false);
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>确认发布成绩详情</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2">
+            确认发布成绩详情吗？
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setCompetitionResultDetailPublishConfirmOpen(false)}
+            disabled={competitionResultPublishing}
+          >
+            取消
+          </Button>
+          <Button
+            variant="contained"
+            onClick={confirmPublishCompetitionResultDetail}
+            disabled={competitionResultPublishing}
+          >
+            {competitionResultPublishing ? '发布中...' : '确认'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={competitionResultDetailOpen}
+        onClose={(event, reason) => {
+          if (competitionResultDetailLoading || reason === 'backdropClick') return;
+          setCompetitionResultDetailOpen(false);
+          setCompetitionResultDetailData(null);
+        }}
+        fullWidth
+        maxWidth="lg"
+        PaperProps={{
+          sx: RESULT_DETAIL_DIALOG_PAPER_SX,
+        }}
+      >
+        <DialogTitle sx={RESULT_DETAIL_DIALOG_TITLE_SX}>成绩详情</DialogTitle>
+        <DialogContent dividers sx={RESULT_DETAIL_DIALOG_CONTENT_SX}>
+          {competitionResultDetailLoading ? (
+            <Stack alignItems="center" spacing={1} sx={{ py: 4 }}>
+              <CircularProgress size={24} />
+              <Typography variant="body2" color="text.secondary">加载成绩详情中...</Typography>
+            </Stack>
+          ) : renderCompetitionResultDetail(competitionResultDetailData)}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => { setCompetitionResultDetailOpen(false); setCompetitionResultDetailData(null); }}>
+            关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={publicResultOpen}
+        onClose={(event, reason) => {
+          if (reason === 'backdropClick') return;
+          setPublicResultOpen(false);
+          setPublicResultTarget(null);
+          setPublicResultRows([]);
+          setPublicResultPublication(null);
+        }}
+        fullWidth
+        maxWidth="xl"
+        PaperProps={{
+          sx: PUBLIC_RESULT_DIALOG_PAPER_SX,
+        }}
+      >
+        <DialogTitle sx={PUBLIC_RESULT_DIALOG_TITLE_SX}>比赛结果（{publicResultTarget?.name || publicResultTarget?.id || '-'}）</DialogTitle>
+        <DialogContent dividers sx={{ px: { xs: 2.6, md: 3.8 }, py: { xs: 2.4, md: 2.8 } }}>
+          {publicResultLoading ? (
+            <Stack alignItems="center" spacing={1} sx={{ py: 4 }}>
+              <CircularProgress size={24} />
+              <Typography variant="body1" color="text.secondary" sx={{ fontSize: { xs: '1.02rem', md: '1.1rem' } }}>加载公开总榜中...</Typography>
+            </Stack>
+          ) : !publicResultRows.length ? (
+            <Typography color="text.secondary" sx={{ fontSize: { xs: '1.08rem', md: '1.16rem' } }}>暂无可展示的公开排名</Typography>
+          ) : (
+            <TableContainer sx={{ border: `1px solid ${CONTEST_THEME.tableBorder}`, borderRadius: 2.5 }}>
+              <Table>
+                <TableHead>
+                  <TableRow sx={{ background: CONTEST_THEME.tableHeadBg }}>
+                    <TableCell sx={PUBLIC_RESULT_TABLE_CELL_SX}>排名</TableCell>
+                    <TableCell sx={PUBLIC_RESULT_TABLE_CELL_SX}>选手名</TableCell>
+                    <TableCell sx={PUBLIC_RESULT_TABLE_CELL_SX}>邮箱</TableCell>
+                    <TableCell sx={PUBLIC_RESULT_TABLE_CELL_SX}>最终得分</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {publicResultRows.map((row, index) => (
+                    <TableRow key={`public_result_${index}`}>
+                      <TableCell sx={PUBLIC_RESULT_TABLE_CELL_SX}>{row?.rank ?? '-'}</TableCell>
+                      <TableCell sx={PUBLIC_RESULT_TABLE_CELL_SX}>{row?.name || '-'}</TableCell>
+                      <TableCell sx={PUBLIC_RESULT_TABLE_CELL_SX}>{row?.email_masked || '-'}</TableCell>
+                      <TableCell sx={PUBLIC_RESULT_TABLE_CELL_SX}>{row?.final_score ?? '-'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+          <Typography
+            variant="body1"
+            color="text.secondary"
+            sx={{ mt: 1.4, fontSize: { xs: '1.04rem', md: '1.12rem' } }}
+          >
+            发布状态：总榜{publicResultPublication?.ranking_published ? '已发布' : '未发布'}，
+            详情{publicResultPublication?.detail_published ? '已发布' : '未发布'}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => { setPublicResultOpen(false); setPublicResultTarget(null); }}>
+            关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={myScoreOpen}
+        onClose={(event, reason) => {
+          if (myScoreLoading || reason === 'backdropClick') return;
+          setMyScoreOpen(false);
+          setMyScoreTarget(null);
+          setMyScoreDetailData(null);
+        }}
+        fullWidth
+        maxWidth="lg"
+        PaperProps={{
+          sx: RESULT_DETAIL_DIALOG_PAPER_SX,
+        }}
+      >
+        <DialogTitle sx={RESULT_DETAIL_DIALOG_TITLE_SX}>
+          我的成绩（{myScoreTarget?.name || myScoreTarget?.id || '-'}）
+        </DialogTitle>
+        <DialogContent dividers sx={RESULT_DETAIL_DIALOG_CONTENT_SX}>
+          {myScoreLoading ? (
+            <Stack alignItems="center" spacing={1} sx={{ py: 4 }}>
+              <CircularProgress size={24} />
+              <Typography variant="body2" color="text.secondary">加载我的成绩中...</Typography>
+            </Stack>
+          ) : renderCompetitionResultDetail(myScoreDetailData)}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => { setMyScoreOpen(false); setMyScoreTarget(null); setMyScoreDetailData(null); }}>
+            关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <AIReviewSettingsDialog
         open={aiReviewOpen}
         competition={aiReviewTarget}
         onClose={() => {
           setAiReviewOpen(false);
           setAiReviewTarget(null);
+        }}
+        onOpenProgress={(row) => {
+          const candidate = row || aiReviewTarget;
+          if (!candidate) return;
+          openAIReviewProgressDialog(candidate);
+        }}
+        setMessage={setMessage}
+      />
+
+      <AIReviewProgressDialog
+        open={aiReviewProgressOpen}
+        competition={aiReviewProgressTarget}
+        currentUserEmail={String(user?.email || '')}
+        onClose={() => {
+          setAiReviewProgressOpen(false);
+          setAiReviewProgressTarget(null);
         }}
         setMessage={setMessage}
       />

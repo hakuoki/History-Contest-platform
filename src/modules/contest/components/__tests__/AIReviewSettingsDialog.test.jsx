@@ -29,7 +29,7 @@ const getCompetitionAIReviewSettingsMock = vi.fn(async () => ({
   data: {
     settings: {
       enabled: true,
-      selected_model_keys: ['qwen35_plus', 'qwen35_flash'],
+      selected_model_keys: ['qwen35_plus', 'qwen35_flash', 'gemini3_flash_preview'],
       runs_per_model_min: 3,
       runs_per_model_max: 5,
       rubric_key: 'history_paper_quantitative',
@@ -49,11 +49,83 @@ const getCompetitionAIReviewSettingsMock = vi.fn(async () => ({
   },
   requestId: 'req_test',
 }));
+const getCompetitionAIReviewProgressMock = vi.fn(async () => ({
+  data: {
+    competition_id: 7,
+    submitted_total: 2,
+    completed_total: 0,
+    running_total: 0,
+    pending_total: 2,
+    failed_total: 0,
+    status: 'running',
+    review_started: false,
+    updated_at: null,
+    models: [
+      {
+        model_key: 'qwen35_plus',
+        model_name: '通义千问 3.5 Plus',
+        success_target_per_submission: 5,
+        target_submission_total: 2,
+        started_submission_total: 0,
+        pending_submission_total: 2,
+        running_submission_total: 0,
+        completed_submission_total: 0,
+        failed_submission_total: 0,
+        run_count_total: 0,
+        success_count_total: 0,
+        failure_count_total: 0,
+        latency_ms_total: 0,
+        latency_ms_avg: 0,
+        targets: [
+          {
+            submission_id: 101,
+            submission_submit_version: 1,
+            review_code: 'A-101',
+            title: '作品101',
+            job_id: null,
+            job_status: 'pending',
+            model_status: 'pending',
+            target_success_count: 5,
+            run_count: 0,
+            success_count: 0,
+            failure_count: 0,
+            latency_ms: 0,
+            updated_at: null,
+          },
+          {
+            submission_id: 102,
+            submission_submit_version: 1,
+            review_code: 'A-102',
+            title: '作品102',
+            job_id: null,
+            job_status: 'pending',
+            model_status: 'pending',
+            target_success_count: 5,
+            run_count: 0,
+            success_count: 0,
+            failure_count: 0,
+            latency_ms: 0,
+            updated_at: null,
+          },
+        ],
+      },
+    ],
+  },
+  requestId: 'req_test',
+}));
+const getCompetitionScoringSettingsMock = vi.fn(async () => ({
+  data: {
+    settings: {
+      ai_review_enabled: true,
+    },
+  },
+  requestId: 'req_test',
+}));
 const updateCompetitionAIReviewSettingsMock = vi.fn(async (_competitionId, payload) => ({
   data: {
     settings: {
       enabled: payload?.enabled === undefined ? true : Boolean(payload?.enabled),
-      selected_model_keys: ['qwen35_plus', 'qwen35_flash'],
+      selected_model_keys: ['qwen35_plus', 'qwen35_flash', 'gemini3_flash_preview'],
       runs_per_model_min: Number(payload?.runs_per_model_min || 0),
       runs_per_model_max: Number(payload?.runs_per_model_max || 0),
       rubric_key: String(payload?.rubric_key || 'history_paper_quantitative'),
@@ -94,8 +166,76 @@ const createCompetitionAIReviewJobsMock = vi.fn(async () => ({
   },
   requestId: 'req_test',
 }));
-const previewCompetitionAIReviewMock = vi.fn(async (_competitionId, payload) => ({
+const controlCompetitionAIReviewRunStateMock = vi.fn(async (_competitionId, payload) => ({
   data: {
+    settings: {
+      enabled: true,
+      selected_model_keys: ['qwen35_plus', 'qwen35_flash', 'gemini3_flash_preview'],
+      runs_per_model_min: 4,
+      runs_per_model_max: 4,
+      rubric_key: 'history_paper_quantitative',
+      status: 'published',
+      review_run_state: String(payload?.action || '').trim().toLowerCase() === 'pause' ? 'paused' : 'running',
+    },
+    model_catalog: [
+      { key: 'qwen35_plus', name: '通义千问 3.5 Plus', mandatory: true, enabled: true },
+      { key: 'qwen35_flash', name: '通义千问 3.5 Flash', mandatory: false, enabled: true },
+      { key: 'gemini3_flash_preview', name: 'Gemini 3 Flash Preview', mandatory: false, enabled: true },
+    ],
+    rubric_catalog: [
+      { key: 'history_paper_quantitative', name: '历史论文量化评审', default: true, enabled: true },
+      { key: 'history_paper_comparative', name: '历史论文对比评审', default: false, enabled: true },
+    ],
+    locked: false,
+    can_edit: true,
+    review_run_state: String(payload?.action || '').trim().toLowerCase() === 'pause' ? 'paused' : 'running',
+    worker_available: true,
+    worker_scheduler_running: true,
+    worker_last_tick_at: new Date().toISOString(),
+    worker_id: 'worker-test',
+  },
+  requestId: 'req_test',
+}));
+const resetCompetitionAIReviewToNotStartedMock = vi.fn(async () => ({
+  data: {
+    settings_response: {
+      settings: {
+        enabled: true,
+        selected_model_keys: ['qwen35_plus', 'qwen35_flash', 'gemini3_flash_preview'],
+        runs_per_model_min: 5,
+        runs_per_model_max: 5,
+        rubric_key: 'history_paper_quantitative',
+        status: 'published',
+        review_run_state: 'not_started',
+      },
+      model_catalog: [
+        { key: 'qwen35_plus', name: '通义千问 3.5 Plus', mandatory: true, enabled: true },
+        { key: 'qwen35_flash', name: '通义千问 3.5 Flash', mandatory: false, enabled: true },
+        { key: 'gemini3_flash_preview', name: 'Gemini 3 Flash Preview', mandatory: false, enabled: true },
+      ],
+      rubric_catalog: [
+        { key: 'history_paper_quantitative', name: '历史论文量化评审', default: true, enabled: true },
+        { key: 'history_paper_comparative', name: '历史论文对比评审', default: false, enabled: true },
+      ],
+      locked: false,
+      can_edit: true,
+      worker_available: false,
+      worker_scheduler_running: false,
+      running_job_count: 0,
+      pending_job_count: 0,
+      active_job_count: 0,
+    },
+    reset_summary: {
+      deleted_job_count: 3,
+      deleted_model_job_count: 9,
+      deleted_run_record_count: 25,
+    },
+  },
+  requestId: 'req_test',
+}));
+function buildPreviewCompetitionAIReviewData(payload = {}) {
+  const fileName = payload?.files?.[0]?.name || payload?.file?.name || 'preview.pdf';
+  return {
     competition_id: 7,
     competition_name: '测试赛',
     rubric_key: String(payload?.rubric_key || 'history_paper_quantitative'),
@@ -112,14 +252,14 @@ const previewCompetitionAIReviewMock = vi.fn(async (_competitionId, payload) => 
       max_input_chars: 40000,
       max_output_tokens: 8000,
     },
-    file_name: payload?.files?.[0]?.name || payload?.file?.name || 'preview.pdf',
+    file_name: fileName,
     file_ext: 'pdf',
     file_size: 12,
     file_count: Array.isArray(payload?.files) ? payload.files.length : 1,
     total_file_size: 12,
     preview_files: [
       {
-        file_name: payload?.files?.[0]?.name || payload?.file?.name || 'preview.pdf',
+        file_name: fileName,
         file_ext: 'pdf',
         file_size: 12,
       },
@@ -129,7 +269,7 @@ const previewCompetitionAIReviewMock = vi.fn(async (_competitionId, payload) => 
     source_summary: [
       {
         source_type: 'preview_file',
-        attachment_name: payload?.files?.[0]?.name || payload?.file?.name || 'preview.pdf',
+        attachment_name: fileName,
         attachment_ext: 'pdf',
         attachment_size: 12,
         extracted_chars: 12,
@@ -161,26 +301,40 @@ const previewCompetitionAIReviewMock = vi.fn(async (_competitionId, payload) => 
       raw_response_json: { choices: [] },
       raw_response_text: '{"comment":"ok"}',
     },
-  },
+  };
+}
+const previewCompetitionAIReviewMock = vi.fn(async (_competitionId, payload) => ({
+  data: buildPreviewCompetitionAIReviewData(payload),
   requestId: 'req_test',
 }));
 
 vi.mock('../../../../api', () => ({
+  controlCompetitionAIReviewRunState: (...args) => controlCompetitionAIReviewRunStateMock(...args),
   createRequestId: (...args) => createRequestIdMock(...args),
   createCompetitionAIReviewJobs: (...args) => createCompetitionAIReviewJobsMock(...args),
+  getCompetitionAIReviewProgress: (...args) => getCompetitionAIReviewProgressMock(...args),
   getCompetitionAIReviewSettings: (...args) => getCompetitionAIReviewSettingsMock(...args),
+  getCompetitionScoringSettings: (...args) => getCompetitionScoringSettingsMock(...args),
   previewCompetitionAIReview: (...args) => previewCompetitionAIReviewMock(...args),
   listCompetitionSubmissionsPaged: (...args) => listCompetitionSubmissionsPagedMock(...args),
+  resetCompetitionAIReviewToNotStarted: (...args) => resetCompetitionAIReviewToNotStartedMock(...args),
   updateCompetitionAIReviewSettings: (...args) => updateCompetitionAIReviewSettingsMock(...args),
 }));
 
 describe('AIReviewSettingsDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    previewCompetitionAIReviewMock.mockReset();
+    previewCompetitionAIReviewMock.mockImplementation(async (_competitionId, payload) => ({
+      data: buildPreviewCompetitionAIReviewData(payload),
+      requestId: 'req_test',
+    }));
+    window.localStorage.clear();
   });
 
   afterEach(() => {
     cleanup();
+    window.localStorage.clear();
   });
 
   it('shows the simplified controls and saves without trigger_mode', async () => {
@@ -193,14 +347,14 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    expect(await screen.findByText('AI评审配置（比赛：测试赛）')).toBeTruthy();
+    expect(await screen.findByText('AI评审（比赛：测试赛）')).toBeTruthy();
     expect(screen.getByText('AI 评审状态')).toBeTruthy();
-    expect(screen.getByText('已启用')).toBeTruthy();
     expect(screen.queryByText('启用 AI 评审')).toBeNull();
     expect(screen.getByRole('spinbutton', { name: '同一个模型评审次数' })).toBeTruthy();
-    expect(screen.getByText('通义千问 3.5 Plus')).toBeTruthy();
-    expect(screen.getByText('通义千问 3.5 Flash')).toBeTruthy();
+    expect(screen.getAllByText('通义千问 3.5 Plus').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('通义千问 3.5 Flash').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: '开始评审' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '评审进度' }).getAttribute('disabled')).not.toBeNull();
     expect(screen.queryByText('触发模式')).toBeNull();
     expect(screen.queryByText('采样温度')).toBeNull();
     expect(screen.getByRole('spinbutton', { name: '评审文本上限字符数' })).toBeTruthy();
@@ -220,7 +374,7 @@ describe('AIReviewSettingsDialog', () => {
     const [competitionId, payload] = updateCompetitionAIReviewSettingsMock.mock.calls[0];
     expect(competitionId).toBe(7);
     expect(payload).toMatchObject({
-      selected_model_keys: ['qwen35_plus', 'qwen35_flash'],
+      selected_model_keys: ['qwen35_plus', 'qwen35_flash', 'gemini3_flash_preview'],
       runs_per_model_min: 4,
       runs_per_model_max: 4,
     });
@@ -232,12 +386,84 @@ describe('AIReviewSettingsDialog', () => {
     expect(payload.max_input_chars).toBe(40000);
     expect(payload.parse_required_formats).toBe(true);
     expect(payload.parse_optional_formats).toBe(false);
-    expect(payload.required_parse_formats).toEqual(['pdf', 'docx']);
+    expect(payload.required_parse_formats).toEqual(['pdf']);
     expect(payload.optional_parse_formats).toEqual([]);
     expect(payload.fail_on_empty_text).toBe(true);
     expect(payload.max_output_tokens).toBe(8000);
     expect(payload.prompt_version).toBeUndefined();
     expect(payload.rubric_version_key).toBeUndefined();
+  });
+
+  it('greys out the page when scoring settings disable AI review', async () => {
+    getCompetitionScoringSettingsMock.mockResolvedValueOnce({
+      data: {
+        settings: {
+          ai_review_enabled: false,
+        },
+      },
+      requestId: 'req_test',
+    });
+
+    render(
+      <AIReviewSettingsDialog
+        open
+        competition={buildCompetition()}
+        onClose={vi.fn()}
+        setMessage={vi.fn()}
+      />
+    );
+
+    await screen.findByText('AI评审（比赛：测试赛）');
+    expect(screen.getByText('未启用AI评审，请前往“评分设置”页面启用。')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '预览评审' }).getAttribute('disabled')).not.toBeNull();
+    expect(screen.getByRole('button', { name: '开始评审' }).getAttribute('disabled')).not.toBeNull();
+    expect(screen.getByRole('button', { name: '修改配置' }).getAttribute('disabled')).not.toBeNull();
+  });
+
+  it('keeps preview enabled but disables edit controls after review has started', async () => {
+    getCompetitionAIReviewSettingsMock.mockResolvedValueOnce({
+      data: {
+        settings: {
+          enabled: true,
+          selected_model_keys: ['qwen35_plus', 'qwen35_flash', 'gemini3_flash_preview'],
+          runs_per_model_min: 3,
+          runs_per_model_max: 5,
+          rubric_key: 'history_paper_quantitative',
+          status: 'published',
+          review_run_state: 'running',
+        },
+        model_catalog: [
+          { key: 'qwen35_plus', name: '通义千问 3.5 Plus', mandatory: true, enabled: true },
+          { key: 'qwen35_flash', name: '通义千问 3.5 Flash', mandatory: false, enabled: true },
+        ],
+        rubric_catalog: [
+          { key: 'history_paper_quantitative', name: '历史论文量化评审', default: true, enabled: true },
+        ],
+        locked: false,
+        can_edit: true,
+        review_run_state: 'running',
+        worker_available: true,
+        worker_scheduler_running: true,
+      },
+      requestId: 'req_test',
+    });
+
+    render(
+      <AIReviewSettingsDialog
+        open
+        competition={buildCompetition()}
+        onClose={vi.fn()}
+        setMessage={vi.fn()}
+      />
+    );
+
+    await screen.findByText('AI评审（比赛：测试赛）');
+    expect(screen.getByText('已开始正式评审，当前不可再修改配置；仍可运行预览评审。')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '评审进度' }).getAttribute('disabled')).toBeNull();
+    expect(screen.getByRole('button', { name: '预览评审' }).getAttribute('disabled')).toBeNull();
+    expect(screen.getByRole('button', { name: '修改配置' }).getAttribute('disabled')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '预览评审' }));
+    expect(await screen.findByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' })).toBeTruthy();
   });
 
   it('keeps runs per model value from backend when it is lower than 5', async () => {
@@ -248,8 +474,52 @@ describe('AIReviewSettingsDialog', () => {
           selected_model_keys: ['qwen35_plus'],
           runs_per_model_min: 1,
           runs_per_model_max: 1,
+          rubric_key: 'history_paper_comparative',
+          status: 'published',
+        },
+        model_catalog: [
+          { key: 'qwen35_plus', name: '通义千问 3.5 Plus', mandatory: true, enabled: true },
+        ],
+        rubric_catalog: [
+          { key: 'history_paper_quantitative', name: '历史论文量化评审', default: false, enabled: true },
+          { key: 'history_paper_comparative', name: '历史论文对比评审', default: true, enabled: true },
+        ],
+        locked: false,
+        can_edit: true,
+      },
+      requestId: 'req_test',
+    });
+
+    render(
+      <AIReviewSettingsDialog
+        open
+        competition={buildCompetition()}
+        onClose={vi.fn()}
+        setMessage={vi.fn()}
+      />
+    );
+
+    await screen.findByText('AI评审（比赛：测试赛）');
+    expect(screen.getByRole('spinbutton', { name: '同一个模型评审次数' }).value).toBe('1');
+  });
+
+  it('uses 5 for untouched legacy default runs_per_model=3/3', async () => {
+    const now = new Date().toISOString();
+    getCompetitionAIReviewSettingsMock.mockResolvedValueOnce({
+      data: {
+        settings: {
+          enabled: true,
+          selected_model_keys: ['qwen35_plus'],
+          runs_per_model_min: 3,
+          runs_per_model_max: 3,
+          parse_required_formats: true,
+          parse_optional_formats: true,
+          required_parse_formats: [],
+          optional_parse_formats: [],
           rubric_key: 'history_paper_quantitative',
           status: 'published',
+          created_at: now,
+          updated_at: now,
         },
         model_catalog: [
           { key: 'qwen35_plus', name: '通义千问 3.5 Plus', mandatory: true, enabled: true },
@@ -272,8 +542,8 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
-    expect(screen.getByRole('spinbutton', { name: '同一个模型评审次数' }).value).toBe('1');
+    await screen.findByText('AI评审（比赛：测试赛）');
+    expect(screen.getByRole('spinbutton', { name: '同一个模型评审次数' }).value).toBe('5');
   });
 
   it('submits customized text and parsing flags exactly as configured in UI', async () => {
@@ -286,7 +556,7 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
+    await screen.findByText('AI评审（比赛：测试赛）');
 
     fireEvent.click(screen.getByRole('button', { name: '修改配置' }));
     fireEvent.change(screen.getByLabelText('评审文本上限字符数'), { target: { value: '56000' } });
@@ -304,9 +574,80 @@ describe('AIReviewSettingsDialog', () => {
     expect(payload.max_input_chars).toBe(56000);
     expect(payload.parse_required_formats).toBe(true);
     expect(payload.parse_optional_formats).toBe(true);
-    expect(payload.required_parse_formats).toEqual(['pdf', 'docx']);
+    expect(payload.required_parse_formats).toEqual(['pdf']);
     expect(payload.optional_parse_formats).toEqual(['xlsx']);
     expect(payload.fail_on_empty_text).toBe(false);
+  });
+
+  it('blocks saving when required numeric fields are empty', async () => {
+    render(
+      <AIReviewSettingsDialog
+        open
+        competition={buildCompetition()}
+        onClose={vi.fn()}
+        setMessage={vi.fn()}
+      />
+    );
+
+    await screen.findByText('AI评审（比赛：测试赛）');
+    fireEvent.click(screen.getByRole('button', { name: '修改配置' }));
+    fireEvent.change(screen.getByLabelText('同一个模型评审次数'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => {
+      expect(updateCompetitionAIReviewSettingsMock).not.toHaveBeenCalled();
+    });
+    expect(screen.getByText('请填写“同一个模型评审次数”')).toBeTruthy();
+  });
+
+  it('defaults required parse formats to docx when pdf is unavailable', async () => {
+    render(
+      <AIReviewSettingsDialog
+        open
+        competition={buildCompetition({
+          required_formats: ['docx', 'xlsx'],
+          optional_formats: [],
+        })}
+        onClose={vi.fn()}
+        setMessage={vi.fn()}
+      />
+    );
+
+    await screen.findByText('AI评审（比赛：测试赛）');
+    fireEvent.click(screen.getByRole('button', { name: '修改配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => {
+      expect(updateCompetitionAIReviewSettingsMock).toHaveBeenCalled();
+    });
+
+    const [, payload] = updateCompetitionAIReviewSettingsMock.mock.calls[0];
+    expect(payload.required_parse_formats).toEqual(['docx']);
+  });
+
+  it('defaults required parse formats to xlsx when only xlsx is available', async () => {
+    render(
+      <AIReviewSettingsDialog
+        open
+        competition={buildCompetition({
+          required_formats: ['xlsx'],
+          optional_formats: [],
+        })}
+        onClose={vi.fn()}
+        setMessage={vi.fn()}
+      />
+    );
+
+    await screen.findByText('AI评审（比赛：测试赛）');
+    fireEvent.click(screen.getByRole('button', { name: '修改配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => {
+      expect(updateCompetitionAIReviewSettingsMock).toHaveBeenCalled();
+    });
+
+    const [, payload] = updateCompetitionAIReviewSettingsMock.mock.calls[0];
+    expect(payload.required_parse_formats).toEqual(['xlsx']);
   });
 
   it('supports selecting none for optional parse formats', async () => {
@@ -319,7 +660,7 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
+    await screen.findByText('AI评审（比赛：测试赛）');
     fireEvent.click(screen.getByRole('button', { name: '修改配置' }));
     fireEvent.mouseDown(getSelectByInputLabel('解析“选交格式”附件内容（可多选）'));
     fireEvent.click(await screen.findByRole('option', { name: '无（不解析选交材料）' }));
@@ -346,7 +687,7 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
+    await screen.findByText('AI评审（比赛：测试赛）');
     fireEvent.click(screen.getByRole('button', { name: '修改配置' }));
     fireEvent.change(screen.getByLabelText('同一个模型评审次数'), { target: { value: '4' } });
     fireEvent.mouseDown(screen.getByLabelText('AI评审规则'));
@@ -374,12 +715,13 @@ describe('AIReviewSettingsDialog', () => {
     expect(within(confirmDialog).getByText('以下配置已保存到后端，请再次确认后开始评审。')).toBeTruthy();
     expect(within(confirmDialog).getByText('同一个模型评审次数：4')).toBeTruthy();
     expect(within(confirmDialog).getByText('评审规则：历史论文对比评审')).toBeTruthy();
-    expect(within(confirmDialog).getByText('已选模型：2 个')).toBeTruthy();
+    expect(within(confirmDialog).getByText('已选模型：3 个')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '确认并开始' }));
 
     await waitFor(() => {
       expect(listCompetitionSubmissionsPagedMock).toHaveBeenCalledTimes(1);
       expect(createCompetitionAIReviewJobsMock).toHaveBeenCalledTimes(1);
+      expect(controlCompetitionAIReviewRunStateMock).toHaveBeenCalledTimes(1);
     });
 
     expect(listCompetitionSubmissionsPagedMock).toHaveBeenCalledWith(
@@ -399,11 +741,16 @@ describe('AIReviewSettingsDialog', () => {
       },
       expect.objectContaining({ requestId: 'req_test' })
     );
+    expect(controlCompetitionAIReviewRunStateMock).toHaveBeenCalledWith(
+      7,
+      { action: 'start' },
+      expect.objectContaining({ requestId: 'req_test' })
+    );
 
     const [savedCompetitionId, savedPayload] = updateCompetitionAIReviewSettingsMock.mock.calls[0];
     expect(savedCompetitionId).toBe(7);
     expect(savedPayload).toMatchObject({
-      selected_model_keys: ['qwen35_plus', 'qwen35_flash'],
+      selected_model_keys: ['qwen35_plus', 'qwen35_flash', 'gemini3_flash_preview'],
       runs_per_model_min: 4,
       runs_per_model_max: 4,
       rubric_key: 'history_paper_comparative',
@@ -413,6 +760,43 @@ describe('AIReviewSettingsDialog', () => {
     expect(setMessage).toHaveBeenCalledWith({
       type: 'success',
       text: '已开始评审，已提交 2 个任务',
+    });
+  });
+
+  it('resets ai review to not_started via password confirm dialog', async () => {
+    const setMessage = vi.fn();
+    render(
+      <AIReviewSettingsDialog
+        open
+        competition={buildCompetition()}
+        onClose={vi.fn()}
+        setMessage={setMessage}
+      />
+    );
+
+    await screen.findByText('AI评审（比赛：测试赛）');
+    fireEvent.click(screen.getByRole('button', { name: '重置评审' }));
+
+    const confirmDialog = await screen.findByRole('dialog', { name: '确认重置评审' });
+    expect(within(confirmDialog).getByText('该操作会把当前比赛 AI 评审重置为未开始状态，且不可撤销。')).toBeTruthy();
+    fireEvent.change(within(confirmDialog).getByLabelText('账号密码（二次确认）'), {
+      target: { value: 'secret' },
+    });
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: '确认重置' }));
+
+    await waitFor(() => {
+      expect(resetCompetitionAIReviewToNotStartedMock).toHaveBeenCalledTimes(1);
+    });
+    expect(resetCompetitionAIReviewToNotStartedMock).toHaveBeenCalledWith(
+      7,
+      {
+        confirm_password: 'secret',
+      },
+      expect.objectContaining({ requestId: 'req_test' })
+    );
+    expect(setMessage).toHaveBeenCalledWith({
+      type: 'success',
+      text: '已重置评审：删除任务 3 条、模型任务 9 条、运行记录 25 条',
     });
   });
 
@@ -431,8 +815,8 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
-    expect(screen.getByText('仅在评审期内可以开始评审。')).toBeTruthy();
+    await screen.findByText('AI评审（比赛：测试赛）');
+    expect(screen.getByText('仅在评审期内可以开始或继续评审。')).toBeTruthy();
     expect(screen.queryByText('服务暂时不可用，请稍后重试')).toBeNull();
 
     const startButton = screen.getByRole('button', { name: '开始评审' });
@@ -457,7 +841,7 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
+    await screen.findByText('AI评审（比赛：测试赛）');
     fireEvent.click(screen.getByRole('button', { name: '预览评审' }));
 
     const previewDialog = await screen.findByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' });
@@ -488,6 +872,117 @@ describe('AIReviewSettingsDialog', () => {
       type: 'success',
       text: 'AI 评审预览已完成',
     });
+  });
+
+  it('persists only the latest preview result and restores it after reopening preview dialog', async () => {
+    const buildPreviewData = (score, grade, rawResponseText) => ({
+      competition_id: 7,
+      competition_name: '测试赛',
+      rubric_key: 'history_paper_quantitative',
+      rubric_name: '历史论文量化评审',
+      prompt_version: 'history_paper_ai_v1',
+      rubric_version_key: 'history-paper-evaluation-4',
+      rubric_hash: 'preview_hash',
+      model_key: 'qwen35_plus',
+      model_name: '通义千问 3.5 Plus',
+      settings_snapshot: {
+        timeout_seconds: 180,
+        retry_count: 2,
+        temperature: 0.2,
+        max_input_chars: 40000,
+        max_output_tokens: 8000,
+      },
+      file_name: 'preview.pdf',
+      file_ext: 'pdf',
+      file_size: 12,
+      file_count: 1,
+      total_file_size: 12,
+      preview_files: [{ file_name: 'preview.pdf', file_ext: 'pdf', file_size: 12 }],
+      original_char_count: 12,
+      truncated: false,
+      source_summary: [],
+      submission_text: '这是一个预览文件。',
+      prompt_messages: [
+        { role: 'system', content: 'system prompt' },
+        { role: 'user', content: 'user prompt' },
+      ],
+      run: {
+        model_key: 'qwen35_plus',
+        model_name: '通义千问 3.5 Plus',
+        status: 'succeeded',
+        score,
+        raw_total_score: score,
+        final_grade: grade,
+        fatal_flag: false,
+        cap_flag: false,
+        cap_grade: null,
+        token_prompt: 100,
+        token_completion: 80,
+        token_total: 180,
+        estimated_cost: 0.12,
+        latency_ms: 456,
+        comment: 'ok',
+        parsed_json: { comment: 'ok' },
+        raw_response_json: { choices: [] },
+        raw_response_text: rawResponseText,
+      },
+    });
+    previewCompetitionAIReviewMock
+      .mockResolvedValueOnce({ data: buildPreviewData(81, 'B', '{"run":1}'), requestId: 'req_test' })
+      .mockResolvedValueOnce({ data: buildPreviewData(95, 'A', '{"run":2}'), requestId: 'req_test' });
+
+    render(
+      <AIReviewSettingsDialog
+        open
+        competition={buildCompetition()}
+        onClose={vi.fn()}
+        setMessage={vi.fn()}
+      />
+    );
+
+    await screen.findByText('AI评审（比赛：测试赛）');
+    fireEvent.click(screen.getByRole('button', { name: '预览评审' }));
+
+    let previewDialog = await screen.findByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' });
+    let fileInput = within(previewDialog).getByLabelText('预览文件_PDF');
+    fireEvent.change(fileInput, { target: { files: [new File(['%PDF-1.7'], 'preview.pdf', { type: 'application/pdf' })] } });
+    fireEvent.click(within(previewDialog).getByRole('button', { name: '运行预览' }));
+    await waitFor(() => {
+      expect(previewCompetitionAIReviewMock).toHaveBeenCalledTimes(1);
+    });
+    expect(await within(previewDialog).findByText('预览完成，等级 B，得分 81。')).toBeTruthy();
+
+    fireEvent.click(within(previewDialog).getByRole('button', { name: '关闭' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' })).toBeNull();
+    });
+    fireEvent.click(screen.getByRole('button', { name: '预览评审' }));
+    previewDialog = await screen.findByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' });
+    expect(await within(previewDialog).findByText(/已加载上一次预览结果/)).toBeTruthy();
+    expect(within(previewDialog).getByText('预览完成，等级 B，得分 81。')).toBeTruthy();
+
+    fileInput = within(previewDialog).getByLabelText('预览文件_PDF');
+    fireEvent.change(fileInput, { target: { files: [new File(['%PDF-1.7'], 'preview.pdf', { type: 'application/pdf' })] } });
+    fireEvent.click(within(previewDialog).getByRole('button', { name: '运行预览' }));
+    await waitFor(() => {
+      expect(previewCompetitionAIReviewMock).toHaveBeenCalledTimes(2);
+    });
+    expect(await within(previewDialog).findByText('预览完成，等级 A，得分 95。')).toBeTruthy();
+
+    const cacheRaw = window.localStorage.getItem('contest_ai_review_preview_result_latest_v1');
+    const cacheParsed = JSON.parse(cacheRaw || '{}');
+    expect(cacheParsed?.result?.run?.score).toBe(95);
+    expect(cacheParsed?.result?.run?.final_grade).toBe('A');
+
+    fireEvent.click(within(previewDialog).getByRole('button', { name: '关闭' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' })).toBeNull();
+    });
+    fireEvent.click(screen.getByRole('button', { name: '预览评审' }));
+    previewDialog = await screen.findByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' });
+    expect(await within(previewDialog).findByText(/已加载上一次预览结果/)).toBeTruthy();
+    expect(within(previewDialog).getByText('预览完成，等级 A，得分 95。')).toBeTruthy();
+    expect(within(previewDialog).queryByText('预览完成，等级 B，得分 81。')).toBeNull();
   });
 
   it('shows hit items in Chinese labels in final summary', async () => {
@@ -564,7 +1059,7 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
+    await screen.findByText('AI评审（比赛：测试赛）');
     fireEvent.click(screen.getByRole('button', { name: '预览评审' }));
 
     const previewDialog = await screen.findByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' });
@@ -585,6 +1080,33 @@ describe('AIReviewSettingsDialog', () => {
   });
 
   it('submits multiple selected preview files in one run', async () => {
+    getCompetitionAIReviewSettingsMock.mockResolvedValueOnce({
+      data: {
+        settings: {
+          enabled: true,
+          selected_model_keys: ['qwen35_plus', 'qwen35_flash', 'gemini3_flash_preview'],
+          runs_per_model_min: 3,
+          runs_per_model_max: 5,
+          rubric_key: 'history_paper_quantitative',
+          parse_required_formats: true,
+          required_parse_formats: ['pdf', 'docx'],
+          status: 'published',
+        },
+        model_catalog: [
+          { key: 'qwen35_plus', name: '通义千问 3.5 Plus', mandatory: true, enabled: true },
+          { key: 'qwen35_flash', name: '通义千问 3.5 Flash', mandatory: false, enabled: true },
+          { key: 'gemini3_flash_preview', name: 'Gemini 3 Flash Preview', mandatory: false, enabled: true },
+        ],
+        rubric_catalog: [
+          { key: 'history_paper_quantitative', name: '历史论文量化评审', default: true, enabled: true },
+          { key: 'history_paper_comparative', name: '历史论文对比评审', default: false, enabled: true },
+        ],
+        locked: false,
+        can_edit: true,
+      },
+      requestId: 'req_test',
+    });
+
     render(
       <AIReviewSettingsDialog
         open
@@ -594,7 +1116,7 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
+    await screen.findByText('AI评审（比赛：测试赛）');
     fireEvent.click(screen.getByRole('button', { name: '预览评审' }));
 
     const previewDialog = await screen.findByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' });
@@ -625,7 +1147,7 @@ describe('AIReviewSettingsDialog', () => {
       />
     );
 
-    await screen.findByText('AI评审配置（比赛：测试赛）');
+    await screen.findByText('AI评审（比赛：测试赛）');
     fireEvent.click(screen.getByRole('button', { name: '预览评审' }));
 
     const previewDialog = await screen.findByRole('dialog', { name: 'AI 评审预览（比赛：测试赛）' });

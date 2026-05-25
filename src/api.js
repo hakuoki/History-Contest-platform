@@ -79,10 +79,6 @@ function pickFileName(headers = {}) {
   return '';
 }
 
-function normalizeMethod(method = '') {
-  return String(method || '').trim().toLowerCase();
-}
-
 function buildLoginRedirectUrl() {
   const defaultPath = '/login';
   const configured = String(
@@ -137,9 +133,7 @@ client.interceptors.response.use(
   (response) => response,
   (error) => {
     const status = Number(error?.response?.status || 0);
-    const method = normalizeMethod(error?.config?.method);
-    const isWriteMethod = ['post', 'put', 'patch', 'delete'].includes(method);
-    if (status === 401 && isWriteMethod) {
+    if (status === 401) {
       redirectToLoginWithNext();
     }
     return Promise.reject(error);
@@ -700,6 +694,20 @@ export async function getCompetitionAIReviewSettings(competitionId, options = {}
   };
 }
 
+export async function getCompetitionAIReviewProgress(competitionId, options = {}) {
+  const { requestId, targetLimitPerModel = 120 } = options;
+  const response = await client.get(`${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/progress`, {
+    headers: requestIdHeaders(requestId),
+    params: {
+      target_limit_per_model: Number(targetLimitPerModel),
+    },
+  });
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
 export async function updateCompetitionAIReviewSettings(competitionId, payload, options = {}) {
   const { requestId } = options;
   const response = await client.put(
@@ -791,11 +799,57 @@ export async function createCompetitionAIReviewJobs(competitionId, payload, opti
   };
 }
 
+export async function recoverCompetitionAIReviewStuckTargets(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/recover-stuck-targets`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function controlCompetitionAIReviewRunState(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/run-control`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function resetCompetitionAIReviewToNotStarted(competitionId, payload = {}, options = {}) {
+  const { requestId } = options;
+  const response = await client.post(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/reset`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
 export async function getCompetitionAIReviewSubmissionDisplay(competitionId, submissionId, options = {}) {
   const { requestId } = options;
+  const params = {};
+  if (Number.isFinite(Number(options?.jobId)) && Number(options.jobId) > 0) {
+    params.job_id = Number(options.jobId);
+  }
+  if (String(options?.modelKey || '').trim()) {
+    params.model_key = String(options.modelKey).trim();
+  }
   const response = await client.get(
     `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/ai-review/submissions/${Number(submissionId)}`,
-    { headers: requestIdHeaders(requestId) }
+    { headers: requestIdHeaders(requestId), params }
   );
   return {
     data: response?.data?.data || null,
@@ -856,6 +910,126 @@ export async function listCompetitionParticipantsStatusPaged(competitionId, limi
     headers: requestIdHeaders(requestId),
   });
   return toPagedResult(response, limit, offset, requestId);
+}
+
+export async function getCompetitionResultPublicStatus(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/results/public-status`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getCompetitionResultSettings(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/results/settings`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function updateCompetitionResultPublishSettings(competitionId, payload, options = {}) {
+  const { requestId } = options;
+  const response = await client.put(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/results/settings/publish`,
+    payload,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function listCompetitionResultsPaged(competitionId, limit = 20, offset = 0, keyword = '', options = {}) {
+  const { sortBy = 'final_score', sortOrder = 'desc', requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/results`,
+    {
+      params: {
+        limit,
+        offset,
+        keyword,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+      },
+      headers: requestIdHeaders(requestId),
+    }
+  );
+  const paged = toPagedResult(response, limit, offset, requestId);
+  return {
+    ...paged,
+    publication: response?.data?.data?.publication || null,
+  };
+}
+
+export async function exportCompetitionResultsBlob(competitionId, options = {}) {
+  const { keyword = '', sortBy = 'final_score', sortOrder = 'desc', requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/results/export`,
+    {
+      params: {
+        keyword,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+      },
+      headers: requestIdHeaders(requestId),
+      responseType: 'blob',
+    }
+  );
+  return {
+    blob: response?.data || null,
+    fileName: pickFileName(response?.headers) || '',
+    contentType: headerValue(response?.headers || {}, 'Content-Type') || '',
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getCompetitionParticipantResultDetail(competitionId, participantUserId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/results/participants/${Number(participantUserId)}/detail`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getCompetitionPublicRanking(competitionId, options = {}) {
+  const { keyword = '', requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/results/public-ranking`,
+    {
+      params: { keyword },
+      headers: requestIdHeaders(requestId),
+    }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
+}
+
+export async function getMyCompetitionResultDetail(competitionId, options = {}) {
+  const { requestId } = options;
+  const response = await client.get(
+    `${COMPETITIONS_API_PREFIX}/${Number(competitionId)}/results/my-score`,
+    { headers: requestIdHeaders(requestId) }
+  );
+  return {
+    data: response?.data?.data || null,
+    requestId: pickRequestId(response?.headers) || requestId || '',
+  };
 }
 
 export async function getCreatePermission(options = {}) {
