@@ -5527,7 +5527,7 @@ function Dashboard({
 
               <TextField
                 fullWidth
-                label="作品简介"
+                label="简介（请填写您的学校、年级、专业，例：xx大学 2023级 中国近现代史）"
                 value={submissionForm.work_description}
                 onChange={(e) => setSubmissionForm((prev) => ({ ...prev, work_description: e.target.value }))}
               />
