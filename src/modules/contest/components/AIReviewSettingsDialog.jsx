@@ -47,7 +47,8 @@ import {
   requiresStrictAIRunMinimums,
 } from '../rules/aiRubricProfiles';
 
-const DEFAULT_MODEL_KEY = 'qwen3_max';
+// const DEFAULT_MODEL_KEY = 'qwen3_max';
+const DEFAULT_MODEL_KEY = null;
 const DEFAULT_RUNS_PER_MODEL = 5;
 const REVIEWABLE_SUBMISSION_STATUSES = new Set(['submitted', 'resubmitted', 'locked']);
 const SERVICE_UNAVAILABLE_TEXT = '服务暂时不可用，请稍后重试';
@@ -196,9 +197,9 @@ function normalizeSelectedModelKeys(modelCatalog, selectedModelKeys) {
     }
   });
 
-  if (!selected.includes(DEFAULT_MODEL_KEY) && catalogMap.has(DEFAULT_MODEL_KEY)) {
-    selected.unshift(DEFAULT_MODEL_KEY);
-  }
+//  if (!selected.includes(DEFAULT_MODEL_KEY) && catalogMap.has(DEFAULT_MODEL_KEY)) {
+//    selected.unshift(DEFAULT_MODEL_KEY);
+//  }
 
   return [...new Set(selected)];
 }
@@ -1352,7 +1353,8 @@ export default function AIReviewSettingsDialog({
 
   const toggleModel = (item) => {
     if (!canEdit || locked) return;
-    if (!item?.key || item.mandatory || item.enabled === false) return;
+     if (!item?.key || /* item.mandatory || */ item.enabled === false) return;
+
     setSelectedModelKeys((prev) => {
       const next = prev.includes(item.key)
         ? prev.filter((key) => key !== item.key)
@@ -1957,7 +1959,7 @@ export default function AIReviewSettingsDialog({
                 <Stack spacing={1}>
                   {modelCatalog.map((item) => {
                     const checked = selectedModelKeySet.has(item.key);
-                    const disabled = !canEdit || locked || saving || !settingsEditing || item.mandatory || item.enabled === false;
+                    const disabled = !canEdit || locked || saving || !settingsEditing || /* item.mandatory || */ item.enabled === false;
                     return (
                       <Box
                         key={item.key}
